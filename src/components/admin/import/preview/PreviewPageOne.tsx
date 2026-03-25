@@ -6,7 +6,11 @@ import { enhanceProductImageUrl } from "@/lib/media/image-quality";
 import { normalizeDisplayedRating } from "@/lib/rating/engine";
 import { sarToUsd } from "@/lib/pricing";
 import type { PricedProduct } from "./types";
-import { deriveAvailableOptionsFromVariants, parseDynamicAvailableOptions } from "@/lib/variants/dynamic-options";
+import {
+  deriveAvailableOptionsFromVariants,
+  extractPreferredOptionOrderFromProductProperties,
+  parseDynamicAvailableOptions,
+} from "@/lib/variants/dynamic-options";
 
 type PreviewPageOneProps = {
   product: PricedProduct;
@@ -64,9 +68,15 @@ export default function PreviewPageOne({ product }: PreviewPageOneProps) {
     const direct = parseDynamicAvailableOptions((product as any).availableOptions ?? (product as any).available_options);
     if (direct.length > 0) return direct;
 
+    const preferredOptionOrder = extractPreferredOptionOrderFromProductProperties({
+      productPropertyList: (product as any).productPropertyList ?? (product as any).product_property_list,
+      propertyList: (product as any).propertyList ?? (product as any).property_list,
+      productOptions: (product as any).productOptions ?? (product as any).product_options,
+    });
+
     const variantDerived = deriveAvailableOptionsFromVariants(
       Array.isArray((product as any).variants) ? ((product as any).variants as any[]) : [],
-      { includeOutOfStockDimensions: false }
+      { includeOutOfStockDimensions: false, preferredOptionOrder }
     );
     return variantDerived;
   })();
@@ -234,7 +244,7 @@ export default function PreviewPageOne({ product }: PreviewPageOneProps) {
               <Ruler className="h-5 w-5 text-purple-600" />
               <span className="text-gray-500 font-medium">Available Options</span>
             </div>
-            <p className="text-gray-400 text-lg">No in-stock options found</p>
+            <p className="text-gray-400 text-lg">No option dimensions provided by supplier (normal for simple products)</p>
           </div>
         )}
 

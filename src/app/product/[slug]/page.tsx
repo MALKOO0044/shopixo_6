@@ -48,7 +48,11 @@ import PriceComparison from "@/components/price-comparison";
 import type { Metadata } from 'next'
 import { getSiteUrl } from "@/lib/site";
 import { buildSyntheticFlashbackReviews, buildSyntheticReviewProfile } from "@/lib/reviews/synthetic-feedback";
-import { deriveAvailableOptionsFromVariants, parseDynamicVariantOptions } from "@/lib/variants/dynamic-options";
+import {
+  deriveAvailableOptionsFromVariants,
+  extractPreferredOptionOrderFromProductProperties,
+  parseDynamicVariantOptions,
+} from "@/lib/variants/dynamic-options";
 import { createServerComponentClient } from "@supabase/auth-helpers-nextjs";
 import { cookies } from "next/headers";
 import { headers } from "next/headers";
@@ -279,12 +283,18 @@ export default async function ProductPage({ params, searchParams }: { params: { 
     }
   } catch {}
   if ((!product.variants || product.variants.length === 0) && variantRows.length > 0) {
+    const preferredOptionOrder = extractPreferredOptionOrderFromProductProperties({
+      productPropertyList: (product as any).productPropertyList ?? (product as any).product_property_list,
+      propertyList: (product as any).propertyList ?? (product as any).property_list,
+      productOptions: (product as any).productOptions ?? (product as any).product_options,
+    });
+
     const dynamicFromRows = deriveAvailableOptionsFromVariants(
       variantRows.map((row) => ({
         ...row,
         variantOptions: parseDynamicVariantOptions((row as any).variant_options),
       })),
-      { includeOutOfStockDimensions: false }
+      { includeOutOfStockDimensions: false, preferredOptionOrder }
     );
 
     if (dynamicFromRows.length > 0) {

@@ -16,6 +16,7 @@ import {
   buildOptionSignature,
   deriveAvailableOptionsFromVariants,
   deriveLegacyOptionArrays,
+  extractPreferredOptionOrderFromProductProperties,
   extractVariantOptionsFromRawVariant,
 } from '@/lib/variants/dynamic-options';
 
@@ -977,6 +978,12 @@ export async function GET(
     
     const originCountry = String(source.originCountry || source.countryOrigin || '').trim() || undefined;
     const hsCode = source.entryCode ? `${source.entryCode}${source.entryNameEn ? ` (${source.entryNameEn})` : ''}` : undefined;
+    const preferredOptionOrder = extractPreferredOptionOrderFromProductProperties({
+      productPropertyList: source.productPropertyList,
+      propertyList: source.propertyList,
+      productOptions: source.productOptions,
+    });
+
     const availableOptions = deriveAvailableOptionsFromVariants(
       variants.map((variant: any) => {
         const variantId = String(variant?.vid || variant?.variantId || variant?.id || '').trim();
@@ -997,7 +1004,7 @@ export async function GET(
           factoryStock: variantStock?.factoryStock,
         };
       }),
-      { includeOutOfStockDimensions: false }
+      { includeOutOfStockDimensions: false, preferredOptionOrder }
     );
     const legacyFromDynamicOptions = deriveLegacyOptionArrays(availableOptions);
     const resolvedAvailableColors = legacyFromDynamicOptions.availableColors;

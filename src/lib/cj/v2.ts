@@ -10,6 +10,7 @@ import {
   buildOptionSignature,
   deriveAvailableOptionsFromVariants,
   deriveLegacyOptionArrays,
+  extractPreferredOptionOrderFromProductProperties,
   extractVariantOptionsFromRawVariant,
   type DynamicAvailableOption,
 } from '@/lib/variants/dynamic-options';
@@ -2476,8 +2477,15 @@ export function mapCjItemToProductLike(item: any): CjProductLike | null {
   const materialEn = parseSafeArray(item.materialNameEnSet || item.materialNameEn) ?? null;
   const packingEn = parseSafeArray(item.packingNameEnSet || item.packingNameEn) ?? null;
 
+  const preferredOptionOrder = extractPreferredOptionOrderFromProductProperties({
+    productPropertyList: item.productPropertyList,
+    propertyList: item.propertyList,
+    productOptions: item.productOptions,
+  });
+
   const availableOptions = deriveAvailableOptionsFromVariants(variants, {
     includeOutOfStockDimensions: false,
+    preferredOptionOrder,
   });
   const legacy = deriveLegacyOptionArrays(availableOptions);
   const availableColors = legacy.availableColors.length > 0 ? legacy.availableColors : null;

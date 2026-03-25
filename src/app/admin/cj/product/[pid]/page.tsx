@@ -30,6 +30,11 @@ import PreviewPageSix from '@/components/admin/import/preview/PreviewPageSix'
 import PreviewPageSeven from '@/components/admin/import/preview/PreviewPageSeven'
 import { normalizeDisplayedRating } from '@/lib/rating/engine'
 import { sarToUsd } from '@/lib/pricing'
+import {
+  deriveAvailableOptionsFromVariants,
+  extractPreferredOptionOrderFromProductProperties,
+  parseDynamicAvailableOptions,
+} from '@/lib/variants/dynamic-options'
 
 function ImageWithFallback({ src, alt, className }: { src: string; alt: string; className?: string }) {
   const [error, setError] = useState(false)
@@ -62,6 +67,24 @@ function ImageWithFallback({ src, alt, className }: { src: string; alt: string; 
 }
 
 type TabType = 'overview' | 'images' | 'specs' | 'inventory' | 'shipping' | 'variants' | 'aiMedia'
+
+function resolveDynamicAvailableOptions(product: PricedProduct | null | undefined) {
+  if (!product) return []
+
+  const direct = parseDynamicAvailableOptions((product as any).availableOptions ?? (product as any).available_options)
+  if (direct.length > 0) return direct
+
+  const preferredOptionOrder = extractPreferredOptionOrderFromProductProperties({
+    productPropertyList: (product as any).productPropertyList ?? (product as any).product_property_list,
+    propertyList: (product as any).propertyList ?? (product as any).property_list,
+    productOptions: (product as any).productOptions ?? (product as any).product_options,
+  })
+
+  return deriveAvailableOptionsFromVariants(
+    Array.isArray(product.variants) ? product.variants : [],
+    { includeOutOfStockDimensions: false, preferredOptionOrder }
+  )
+}
 
 export default function CjProductAdminPage({ params }: { params: { pid: string } }) {
   const pid = decodeURIComponent(params.pid)
@@ -170,6 +193,7 @@ export default function CjProductAdminPage({ params }: { params: { pid: string }
         .map((line) => line.trim())
         .filter(Boolean)
         .slice(0, 8)
+      const availableOptionsForQueue = resolveDynamicAvailableOptions(product)
 
       const res = await fetch('/api/admin/import/batch', {
         method: 'POST',
@@ -199,6 +223,7 @@ export default function CjProductAdminPage({ params }: { params: { pid: string }
                 : 0,
             displayedRating: typeof product.displayedRating === 'number' ? product.displayedRating : undefined,
             ratingConfidence: typeof product.ratingConfidence === 'number' ? product.ratingConfidence : undefined,
+            availableOptions: availableOptionsForQueue.length > 0 ? availableOptionsForQueue : undefined,
             availableColors: product.availableColors || [],
             availableSizes: product.availableSizes || [],
             specifications,
@@ -271,6 +296,15 @@ export default function CjProductAdminPage({ params }: { params: { pid: string }
   const displayedRating = typeof product.displayedRating === 'number'
     ? normalizeDisplayedRating(product.displayedRating)
     : null
+  const dynamicAvailableOptions = resolveDynamicAvailableOptions(product)
+  const visibleDynamicOptions = dynamicAvailableOptions
+    .map((option) => ({
+      ...option,
+      visibleValues: Array.isArray(option.inStockValues)
+        ? option.inStockValues.filter((value) => typeof value === 'string' && value.trim().length > 0)
+        : [],
+    }))
+    .filter((option) => option.visibleValues.length > 0)
 
   return (
     <div className="min-h-screen bg-gray-50">
@@ -576,61 +610,29 @@ export default function CjProductAdminPage({ params }: { params: { pid: string }
               </div>
             )}
 
-            {(product.availableColors?.length || product.availableSizes?.length || product.availableModels?.length) && (
+            {visibleDynamicOptions.length > 0 && (
               <div className="bg-white rounded-xl border shadow-sm p-6">
                 <h3 className="text-lg font-semibold text-gray-900 mb-4">Available Options</h3>
                 <div className="space-y-4">
-                  {product.availableColors && product.availableColors.length > 0 && (
-                    <div>
-                      <span className="text-sm font-medium text-gray-700">Colors ({product.availableColors.length})</span>
+                  {visibleDynamicOptions.map((option) => (
+                    <div key={option.name}>
+                      <span className="text-sm font-medium text-gray-700">
+                        {option.name} ({option.visibleValues.length})
+                      </span>
                       <div className="flex flex-wrap gap-2 mt-2">
-                        {product.availableColors.slice(0, 10).map((color, idx) => (
-                          <span key={idx} className="px-3 py-1 bg-gray-100 text-gray-700 text-sm rounded-full">
-                            {color}
+                        {option.visibleValues.slice(0, 10).map((value, idx) => (
+                          <span key={`${option.name}-${idx}-${value}`} className="px-3 py-1 bg-gray-100 text-gray-700 text-sm rounded-full">
+                            {value}
                           </span>
                         ))}
-                        {product.availableColors.length > 10 && (
+                        {option.visibleValues.length > 10 && (
                           <span className="px-3 py-1 bg-gray-200 text-gray-600 text-sm rounded-full">
-                            +{product.availableColors.length - 10} more
+                            +{option.visibleValues.length - 10} more
                           </span>
                         )}
                       </div>
                     </div>
-                  )}
-                  {product.availableSizes && product.availableSizes.length > 0 && (
-                    <div>
-                      <span className="text-sm font-medium text-gray-700">Sizes ({product.availableSizes.length})</span>
-                      <div className="flex flex-wrap gap-2 mt-2">
-                        {product.availableSizes.slice(0, 10).map((size, idx) => (
-                          <span key={idx} className="px-3 py-1 bg-blue-100 text-blue-700 text-sm rounded-full">
-                            {size}
-                          </span>
-                        ))}
-                        {product.availableSizes.length > 10 && (
-                          <span className="px-3 py-1 bg-blue-200 text-blue-600 text-sm rounded-full">
-                            +{product.availableSizes.length - 10} more
-                          </span>
-                        )}
-                      </div>
-                    </div>
-                  )}
-                  {product.availableModels && product.availableModels.length > 0 && (
-                    <div>
-                      <span className="text-sm font-medium text-gray-700">Compatible Devices ({product.availableModels.length})</span>
-                      <div className="flex flex-wrap gap-2 mt-2">
-                        {product.availableModels.slice(0, 8).map((model, idx) => (
-                          <span key={idx} className="px-3 py-1 bg-purple-100 text-purple-700 text-sm rounded-full">
-                            {model}
-                          </span>
-                        ))}
-                        {product.availableModels.length > 8 && (
-                          <span className="px-3 py-1 bg-purple-200 text-purple-600 text-sm rounded-full">
-                            +{product.availableModels.length - 8} more
-                          </span>
-                        )}
-                      </div>
-                    </div>
-                  )}
+                  ))}
                 </div>
               </div>
             )}

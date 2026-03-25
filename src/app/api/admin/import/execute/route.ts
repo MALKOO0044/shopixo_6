@@ -13,6 +13,8 @@ import {
   buildOptionSignature,
   deriveAvailableOptionsFromVariants,
   deriveLegacyOptionArrays,
+  evaluateVariantStockEligibility,
+  extractPreferredOptionOrderFromProductProperties,
   extractVariantOptionsFromRawVariant,
   parseDynamicAvailableOptions,
   parseDynamicVariantOptions,
@@ -499,9 +501,33 @@ function parseColorImageMap(value: unknown): Record<string, string> {
 }
 
 function resolveQueueAvailableOptions(queueRow: Record<string, any>, variants: any[]): Array<{ name: string; values: string[]; inStockValues: string[]; source?: string }> {
-  const direct = parseDynamicAvailableOptions(queueRow.available_options);
+  const direct = parseDynamicAvailableOptions(queueRow.available_options ?? queueRow.availableOptions);
   if (direct.length > 0) return direct;
-  return deriveAvailableOptionsFromVariants(variants, { includeOutOfStockDimensions: false });
+  const rawMetadata = parseJsonMaybe(queueRow?.metadata);
+  const metadata = rawMetadata && typeof rawMetadata === "object" && !Array.isArray(rawMetadata)
+    ? (rawMetadata as Record<string, any>)
+    : null;
+  const preferredOptionOrder = extractPreferredOptionOrderFromProductProperties({
+    productPropertyList:
+      queueRow.productPropertyList ??
+      queueRow.product_property_list ??
+      metadata?.productPropertyList ??
+      metadata?.product_property_list,
+    propertyList:
+      queueRow.propertyList ??
+      queueRow.property_list ??
+      metadata?.propertyList ??
+      metadata?.property_list,
+    productOptions:
+      queueRow.productOptions ??
+      queueRow.product_options ??
+      metadata?.productOptions ??
+      metadata?.product_options,
+  });
+  return deriveAvailableOptionsFromVariants(variants, {
+    includeOutOfStockDimensions: false,
+    preferredOptionOrder,
+  });
 }
 
 function toPositiveNumberOrNull(value: unknown): number | null {
@@ -946,6 +972,32 @@ export async function POST(req: NextRequest) {
             };
           })
           .filter((variant): variant is NonNullable<typeof variant> => Boolean(variant));
+
+        const variantStockEligibility = evaluateVariantStockEligibility(
+          variants.map((variant) => ({
+            variantOptions: parseDynamicVariantOptions((variant as any).variant_options),
+            stock: (variant as any).stock,
+            totalStock: (variant as any).stock,
+            cjStock: (variant as any).cj_stock,
+            factoryStock: (variant as any).factory_stock,
+            color: (variant as any).color,
+            size: (variant as any).size,
+          }))
+        );
+        if (variantStockEligibility.shouldBlockForOutOfStockOptions) {
+          const reason = 'Excluded from import: all configurable variants are out of stock.';
+          await admin
+            .from('product_queue')
+            .update({
+              status: 'rejected',
+              admin_notes: reason,
+              reviewed_at: new Date().toISOString(),
+              updated_at: new Date().toISOString(),
+            })
+            .eq('id', qp.id);
+          results.push({ id: qp.id, success: false, error: reason });
+          continue;
+        }
 
         const availableOptions = resolveQueueAvailableOptions(qp as any, variants);
         const legacyFromDynamicOptions = deriveLegacyOptionArrays(availableOptions);

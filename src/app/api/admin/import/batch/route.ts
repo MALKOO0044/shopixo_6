@@ -13,6 +13,7 @@ import { extractCjProductVideoUrl, normalizeCjVideoUrl } from "@/lib/cj/video";
 import { build4kVideoDelivery, requiresVideoForMediaMode } from "@/lib/video/delivery";
 import { normalizeSizeList } from "@/lib/cj/size-normalization";
 import { ensureHydrated } from "@/lib/hydration/service";
+import { evaluateVariantStockEligibility } from "@/lib/variants/dynamic-options";
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -75,6 +76,7 @@ export async function POST(req: NextRequest) {
     let failedCount = 0;
     let skippedMissingVideoCount = 0;
     let skippedVideoQualityGateCount = 0;
+    let skippedOutOfStockConfigurableCount = 0;
     const failedProducts: string[] = [];
     const errorMessages: string[] = [];
     
@@ -164,6 +166,33 @@ export async function POST(req: NextRequest) {
         }
       }
       if (!p) continue;
+
+      const stockEligibility = evaluateVariantStockEligibility(
+        Array.isArray(p.variants)
+          ? p.variants.map((variant: any) => ({
+              variantOptions: variant?.variantOptions ?? variant?.variant_options,
+              variant_options: variant?.variant_options ?? variant?.variantOptions,
+              stock: variant?.stock,
+              totalStock: variant?.totalStock,
+              cjStock: variant?.cjStock,
+              factoryStock: variant?.factoryStock,
+              cj_stock: variant?.cj_stock,
+              factory_stock: variant?.factory_stock,
+              color: variant?.color,
+              size: variant?.size,
+              model: variant?.model,
+            }))
+          : []
+      );
+      if (stockEligibility.shouldBlockForOutOfStockOptions) {
+        skippedOutOfStockConfigurableCount++;
+        failedCount++;
+        failedProducts.push(String(productId));
+        if (errorMessages.length < 3) {
+          errorMessages.push(`Skipped product ${productId}: all configurable variants are out of stock.`);
+        }
+        continue;
+      }
 
       let avgPrice = p.avgPriceSAR || 0;
       if (!avgPrice && p.variants?.length > 0) {
@@ -277,6 +306,9 @@ export async function POST(req: NextRequest) {
         inventoryErrorMessage: p.inventoryErrorMessage || undefined,
         priceBreakdown: p.priceBreakdown || undefined,
         colorImageMap: p.colorImageMap || undefined,
+        productPropertyList: (p as any).productPropertyList || undefined,
+        propertyList: (p as any).propertyList || undefined,
+        productOptions: (p as any).productOptions || undefined,
         cjTotalCost: p.cjTotalCost || undefined,
         cjShippingCost: p.cjShippingCost || undefined,
         cjProductCost: p.cjProductCost || undefined,
@@ -304,13 +336,17 @@ export async function POST(req: NextRequest) {
       const qualityDetail = skippedVideoQualityGateCount > 0
         ? ` ${skippedVideoQualityGateCount} products were excluded because video failed strict 4K quality gate.`
         : '';
+      const outOfStockDetail = skippedOutOfStockConfigurableCount > 0
+        ? ` ${skippedOutOfStockConfigurableCount} products were excluded because all configurable variants are out of stock.`
+        : '';
       return NextResponse.json({ 
         ok: false, 
-        error: `Failed to add any products to queue. ${failedCount} products failed.${mediaDetail}${qualityDetail}${errorDetail}`,
+        error: `Failed to add any products to queue. ${failedCount} products failed.${mediaDetail}${qualityDetail}${outOfStockDetail}${errorDetail}`,
         failedProducts: failedProducts.slice(0, 10),
         errorDetails: errorMessages,
         skippedMissingVideo: skippedMissingVideoCount,
         skippedVideoQualityGate: skippedVideoQualityGateCount,
+        skippedOutOfStockConfigurable: skippedOutOfStockConfigurableCount,
       }, { status: 500 });
     }
 
@@ -320,6 +356,7 @@ export async function POST(req: NextRequest) {
       requires_video: requiresVideo,
       skipped_missing_video: skippedMissingVideoCount,
       skipped_video_quality_gate: skippedVideoQualityGateCount,
+      skipped_out_of_stock_configurable: skippedOutOfStockConfigurableCount,
       keywords, 
       category 
     });
@@ -331,6 +368,7 @@ export async function POST(req: NextRequest) {
       productsFailed: failedCount,
       productsSkippedMissingVideo: skippedMissingVideoCount,
       productsSkippedVideoQualityGate: skippedVideoQualityGateCount,
+      productsSkippedOutOfStockConfigurable: skippedOutOfStockConfigurableCount,
       ...(failedCount > 0 && { warning: `${failedCount} products failed to add` }),
     });
   } catch (e: any) {

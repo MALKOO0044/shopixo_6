@@ -21,6 +21,12 @@ import {
 import SmartImage from "@/components/smart-image";
 import { enhanceProductImageUrl } from "@/lib/media/image-quality";
 import { sarToUsd } from "@/lib/pricing";
+import {
+  deriveAvailableOptionsFromVariants,
+  extractPreferredOptionOrderFromProductProperties,
+  parseDynamicAvailableOptions,
+  type DynamicAvailableOption,
+} from "@/lib/variants/dynamic-options";
 
 type QueueProduct = {
   id: number;
@@ -32,7 +38,7 @@ type QueueProduct = {
   name_ar: string | null;
   category: string;
   images: string[];
-  variants: any[];
+  variants: any[] | string | null;
   cj_price_usd: number;
   shipping_cost_usd: number | null;
   calculated_retail_sar: number | null;
@@ -50,6 +56,14 @@ type QueueProduct = {
   created_at: string;
   available_colors?: string[];
   available_sizes?: string[];
+  available_options?: unknown;
+  availableOptions?: unknown;
+  product_property_list?: unknown;
+  productPropertyList?: unknown;
+  property_list?: unknown;
+  propertyList?: unknown;
+  product_options?: unknown;
+  productOptions?: unknown;
   variant_pricing?: any[] | string | null;
   video_url?: string | null;
   video_source_url?: string | null;
@@ -62,6 +76,19 @@ type QueueProduct = {
 };
 
 function parseQueueVariantPricing(value: QueueProduct["variant_pricing"]): any[] {
+  if (Array.isArray(value)) return value;
+  if (typeof value === "string") {
+    try {
+      const parsed = JSON.parse(value);
+      return Array.isArray(parsed) ? parsed : [];
+    } catch {
+      return [];
+    }
+  }
+  return [];
+}
+
+function parseQueueVariants(value: QueueProduct["variants"]): any[] {
   if (Array.isArray(value)) return value;
   if (typeof value === "string") {
     try {
@@ -121,6 +148,22 @@ function resolveQueueStoreSku(product: QueueProduct): string {
   if (productCode) return productCode;
 
   return product.cj_product_id || "-";
+}
+
+function resolveQueueDynamicOptions(product: QueueProduct): DynamicAvailableOption[] {
+  const direct = parseDynamicAvailableOptions(product.available_options ?? product.availableOptions);
+  if (direct.length > 0) return direct;
+
+  const preferredOptionOrder = extractPreferredOptionOrderFromProductProperties({
+    productPropertyList: product.productPropertyList ?? product.product_property_list,
+    propertyList: product.propertyList ?? product.property_list,
+    productOptions: product.productOptions ?? product.product_options,
+  });
+
+  return deriveAvailableOptionsFromVariants(
+    parseQueueVariants(product.variants),
+    { includeOutOfStockDimensions: false, preferredOptionOrder }
+  );
 }
 
 function hasQueueVideo(product: QueueProduct): boolean {
@@ -837,6 +880,15 @@ export default function QueuePage() {
                 const displayMarginPercent = resolveQueueMarginPercent(product);
                 const displayStoreSku = resolveQueueStoreSku(product);
                 const queueVideoUrl = getQueueVideoUrl(product);
+                const queueVariants = parseQueueVariants(product.variants);
+                const visibleDynamicOptions = resolveQueueDynamicOptions(product)
+                  .map((option) => ({
+                    ...option,
+                    visibleValues: Array.isArray(option.inStockValues)
+                      ? option.inStockValues.filter((value) => typeof value === "string" && value.trim().length > 0)
+                      : [],
+                  }))
+                  .filter((option) => option.visibleValues.length > 0);
 
                 return editingId === product.id ? (
                   <tr key={product.id} className="bg-blue-50">
@@ -1004,26 +1056,43 @@ export default function QueuePage() {
                     </td>
                     <td className="px-4 py-3">
                       <div className="space-y-1">
-                        {product.available_colors && product.available_colors.length > 0 && (
-                          <div className="flex items-center gap-1 flex-wrap">
-                            <span className="text-xs text-gray-500">Colors:</span>
-                            <span className="text-xs font-medium text-gray-700">{product.available_colors.length}</span>
-                            <span className="text-xs text-gray-400 truncate max-w-[120px]" title={product.available_colors.join(', ')}>
-                              ({product.available_colors.slice(0, 3).join(', ')}{product.available_colors.length > 3 ? '...' : ''})
-                            </span>
-                          </div>
-                        )}
-                        {product.available_sizes && product.available_sizes.length > 0 && (
-                          <div className="flex items-center gap-1 flex-wrap">
-                            <span className="text-xs text-gray-500">Sizes:</span>
-                            <span className="text-xs font-medium text-gray-700">{product.available_sizes.length}</span>
-                            <span className="text-xs text-gray-400 truncate max-w-[120px]" title={product.available_sizes.join(', ')}>
-                              ({product.available_sizes.slice(0, 4).join(', ')}{product.available_sizes.length > 4 ? '...' : ''})
-                            </span>
-                          </div>
-                        )}
-                        {(!product.available_colors || product.available_colors.length === 0) && (!product.available_sizes || product.available_sizes.length === 0) && (
-                          <span className="text-xs text-gray-400">{product.variants?.length || 0} variants</span>
+                        {visibleDynamicOptions.length > 0 ? (
+                          visibleDynamicOptions.map((option, optionIndex) => (
+                            <div key={`${product.id}-opt-${optionIndex}-${option.name}`} className="flex items-center gap-1 flex-wrap">
+                              <span className="text-xs text-gray-500">{option.name}:</span>
+                              <span className="text-xs font-medium text-gray-700">{option.visibleValues.length}</span>
+                              <span
+                                className="text-xs text-gray-400 truncate max-w-[120px]"
+                                title={option.visibleValues.join(', ')}
+                              >
+                                ({option.visibleValues.slice(0, 3).join(', ')}{option.visibleValues.length > 3 ? '...' : ''})
+                              </span>
+                            </div>
+                          ))
+                        ) : (
+                          <>
+                            {product.available_colors && product.available_colors.length > 0 && (
+                              <div className="flex items-center gap-1 flex-wrap">
+                                <span className="text-xs text-gray-500">Colors:</span>
+                                <span className="text-xs font-medium text-gray-700">{product.available_colors.length}</span>
+                                <span className="text-xs text-gray-400 truncate max-w-[120px]" title={product.available_colors.join(', ')}>
+                                  ({product.available_colors.slice(0, 3).join(', ')}{product.available_colors.length > 3 ? '...' : ''})
+                                </span>
+                              </div>
+                            )}
+                            {product.available_sizes && product.available_sizes.length > 0 && (
+                              <div className="flex items-center gap-1 flex-wrap">
+                                <span className="text-xs text-gray-500">Sizes:</span>
+                                <span className="text-xs font-medium text-gray-700">{product.available_sizes.length}</span>
+                                <span className="text-xs text-gray-400 truncate max-w-[120px]" title={product.available_sizes.join(', ')}>
+                                  ({product.available_sizes.slice(0, 4).join(', ')}{product.available_sizes.length > 4 ? '...' : ''})
+                                </span>
+                              </div>
+                            )}
+                            {(!product.available_colors || product.available_colors.length === 0) && (!product.available_sizes || product.available_sizes.length === 0) && (
+                              <span className="text-xs text-gray-400">{queueVariants.length} variants</span>
+                            )}
+                          </>
                         )}
                       </div>
                     </td>

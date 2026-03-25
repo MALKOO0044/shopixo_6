@@ -13,7 +13,9 @@ import {
   buildOptionSignature,
   deriveAvailableOptionsFromVariants,
   deriveLegacyOptionArrays,
+  extractPreferredOptionOrderFromProductProperties,
   extractVariantOptionsFromRawVariant,
+  parseDynamicAvailableOptions,
 } from '@/lib/variants/dynamic-options';
 
 export const dynamic = 'force-dynamic';
@@ -152,9 +154,19 @@ export async function POST(req: Request) {
         // Calculate totalStock from known values only, but keep ALL variants (even with unknown stock)
         // If ALL variants have unknown stock, product stock should be null (not 0)
         const variants = cj.variants || [];
-        const dynamicAvailableOptions = deriveAvailableOptionsFromVariants(variants, {
-          includeOutOfStockDimensions: false,
+        const preferredOptionOrder = extractPreferredOptionOrderFromProductProperties({
+          productPropertyList: (cj as any)?.productPropertyList,
+          propertyList: (cj as any)?.propertyList,
+          productOptions: (cj as any)?.productOptions,
         });
+        const dynamicAvailableOptions = (() => {
+          const direct = parseDynamicAvailableOptions((cj as any)?.availableOptions ?? (cj as any)?.available_options);
+          if (direct.length > 0) return direct;
+          return deriveAvailableOptionsFromVariants(variants, {
+            includeOutOfStockDimensions: false,
+            preferredOptionOrder,
+          });
+        })();
         const legacy = deriveLegacyOptionArrays(dynamicAvailableOptions);
         const deduplicatedAvailableSizes = legacy.availableSizes;
         const deduplicatedAvailableColors = legacy.availableColors;

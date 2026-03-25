@@ -1,5 +1,11 @@
 export type DynamicVariantOptions = Record<string, string>;
 
+type ProductPropertySourcesLike = {
+  productPropertyList?: unknown;
+  propertyList?: unknown;
+  productOptions?: unknown;
+};
+
 export type DynamicAvailableOption = {
   name: string;
   values: string[];
@@ -36,6 +42,15 @@ export function normalizeOptionNameKey(name: unknown): string {
 
 function normalizeValueKey(value: unknown): string {
   return cleanText(value).toLowerCase();
+}
+
+function pushOrderedOptionName(target: string[], seen: Set<string>, name: unknown): void {
+  const normalizedName = normalizeOptionName(name);
+  const normalizedKey = normalizeOptionNameKey(normalizedName);
+  if (!normalizedName || !normalizedKey) return;
+  if (seen.has(normalizedKey)) return;
+  seen.add(normalizedKey);
+  target.push(normalizedName);
 }
 
 function pushPair(target: OptionPair[], name: unknown, value: unknown, source?: string) {
@@ -121,6 +136,42 @@ export function extractNamedOptionPairsFromPropertyList(rawList: unknown, source
   }
 
   return out;
+}
+
+export function extractPreferredOptionOrderFromPropertyList(rawList: unknown): string[] {
+  const list = Array.isArray(rawList) ? rawList : [];
+  const ordered: string[] = [];
+  const seen = new Set<string>();
+
+  for (const item of list) {
+    if (item == null) continue;
+    if (typeof item === "object" && !Array.isArray(item)) {
+      pushOrderedOptionName(ordered, seen, readNameFromUnknown(item));
+      continue;
+    }
+    pushOrderedOptionName(ordered, seen, item);
+  }
+
+  return ordered;
+}
+
+export function extractPreferredOptionOrderFromProductProperties(source: ProductPropertySourcesLike | null | undefined): string[] {
+  const ordered: string[] = [];
+  const seen = new Set<string>();
+  const candidateLists = [
+    source?.productPropertyList,
+    source?.propertyList,
+    source?.productOptions,
+  ];
+
+  for (const list of candidateLists) {
+    const names = extractPreferredOptionOrderFromPropertyList(list);
+    for (const name of names) {
+      pushOrderedOptionName(ordered, seen, name);
+    }
+  }
+
+  return ordered;
 }
 
 export function extractVariantOptionsFromRawVariant(variant: any): DynamicVariantOptions {
@@ -225,10 +276,11 @@ export function deriveAvailableOptionsFromVariants(
     size?: unknown;
     model?: unknown;
   }> | null | undefined,
-  opts?: { includeOutOfStockDimensions?: boolean }
+  opts?: { includeOutOfStockDimensions?: boolean; preferredOptionOrder?: string[] }
 ): DynamicAvailableOption[] {
   const list = Array.isArray(variants) ? variants : [];
   const includeOutOfStockDimensions = Boolean(opts?.includeOutOfStockDimensions);
+  const preferredOrderInput = Array.isArray(opts?.preferredOptionOrder) ? opts?.preferredOptionOrder : [];
 
   const order: string[] = [];
   const labels = new Map<string, string>();
@@ -236,6 +288,20 @@ export function deriveAvailableOptionsFromVariants(
   const inStockValuesByName = new Map<string, string[]>();
   const allValueKeys = new Map<string, Set<string>>();
   const inStockValueKeys = new Map<string, Set<string>>();
+  const preferredOrderKeys: string[] = [];
+  const preferredOrderSeen = new Set<string>();
+
+  for (const rawName of preferredOrderInput) {
+    const preferredName = normalizeOptionName(rawName);
+    const preferredKey = normalizeOptionNameKey(preferredName);
+    if (!preferredName || !preferredKey) continue;
+    if (preferredOrderSeen.has(preferredKey)) continue;
+    preferredOrderSeen.add(preferredKey);
+    preferredOrderKeys.push(preferredKey);
+    if (!labels.has(preferredKey)) {
+      labels.set(preferredKey, preferredName);
+    }
+  }
 
   const pushValue = (
     collection: Map<string, string[]>,
@@ -287,8 +353,23 @@ export function deriveAvailableOptionsFromVariants(
   }
 
   const out: DynamicAvailableOption[] = [];
+  const orderedOptionKeys: string[] = [];
+  const emittedKeys = new Set<string>();
 
-  for (const optionKey of order) {
+  for (const preferredKey of preferredOrderKeys) {
+    if (!labels.has(preferredKey)) continue;
+    if (emittedKeys.has(preferredKey)) continue;
+    emittedKeys.add(preferredKey);
+    orderedOptionKeys.push(preferredKey);
+  }
+
+  for (const observedKey of order) {
+    if (emittedKeys.has(observedKey)) continue;
+    emittedKeys.add(observedKey);
+    orderedOptionKeys.push(observedKey);
+  }
+
+  for (const optionKey of orderedOptionKeys) {
     const name = labels.get(optionKey) || optionKey;
     const values = allValuesByName.get(optionKey) || [];
     const inStockValues = inStockValuesByName.get(optionKey) || [];
@@ -306,6 +387,58 @@ export function deriveAvailableOptionsFromVariants(
   }
 
   return out;
+}
+
+export function evaluateVariantStockEligibility(
+  variants: Array<{
+    variantOptions?: DynamicVariantOptions | null;
+    variant_options?: DynamicVariantOptions | null;
+    stock?: unknown;
+    totalStock?: unknown;
+    cjStock?: unknown;
+    factoryStock?: unknown;
+    cj_stock?: unknown;
+    factory_stock?: unknown;
+    color?: unknown;
+    size?: unknown;
+    model?: unknown;
+  }> | null | undefined
+): {
+  hasOptionDimensions: boolean;
+  hasInStockVariant: boolean;
+  shouldBlockForOutOfStockOptions: boolean;
+} {
+  const list = Array.isArray(variants) ? variants : [];
+  let hasOptionDimensions = false;
+  let hasInStockVariant = false;
+
+  for (const variant of list) {
+    const fromVariant = variant?.variantOptions && typeof variant.variantOptions === "object"
+      ? variant.variantOptions
+      : (variant?.variant_options && typeof variant.variant_options === "object"
+        ? variant.variant_options
+        : null);
+
+    const optionMap = fromVariant && Object.keys(fromVariant).length > 0
+      ? fromVariant
+      : extractVariantOptionsFromRawVariant(variant);
+
+    if (!hasOptionDimensions && Object.keys(optionMap).length > 0) {
+      hasOptionDimensions = true;
+    }
+
+    if (!hasInStockVariant && isVariantInStockStrict(variant)) {
+      hasInStockVariant = true;
+    }
+
+    if (hasOptionDimensions && hasInStockVariant) break;
+  }
+
+  return {
+    hasOptionDimensions,
+    hasInStockVariant,
+    shouldBlockForOutOfStockOptions: hasOptionDimensions && !hasInStockVariant,
+  };
 }
 
 export function deriveLegacyOptionArrays(availableOptions: DynamicAvailableOption[] | null | undefined): {

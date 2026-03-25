@@ -18,6 +18,7 @@ import { extractImagesFromHtml, parseProductDescription } from "@/components/pro
 import {
   buildOptionSignature,
   deriveAvailableOptionsFromVariants,
+  extractPreferredOptionOrderFromProductProperties,
   type DynamicAvailableOption,
   isVariantInStockStrict,
   normalizeOptionNameKey,
@@ -635,6 +636,7 @@ interface ColorSelectorProps {
   onColorChange: (color: string) => void;
   colorImages?: Record<string, string>;
   hotColors?: string[];
+  label?: string;
 }
 
 // Map color names to CSS colors for swatch display
@@ -685,13 +687,13 @@ function getColorFromName(colorName: string): string | null {
   return null;
 }
 
-function ColorSelector({ colors, selectedColor, onColorChange, colorImages = {}, hotColors = [] }: ColorSelectorProps) {
+function ColorSelector({ colors, selectedColor, onColorChange, colorImages = {}, hotColors = [], label = 'Color' }: ColorSelectorProps) {
   if (colors.length === 0) return null;
 
   return (
     <div className="space-y-3">
       <div className="flex items-center gap-2">
-        <span className="text-sm font-medium text-foreground">Color:</span>
+        <span className="text-sm font-medium text-foreground">{label}:</span>
         <span className="text-sm text-primary font-medium">{selectedColor}</span>
       </div>
       <div className="flex flex-wrap gap-2">
@@ -1095,20 +1097,29 @@ export default function ProductDetailsClient({
     const direct = parseDynamicAvailableOptions((product as any).available_options ?? (product as any).availableOptions);
     if (direct.length > 0) return direct;
 
+    const preferredOptionOrder = extractPreferredOptionOrderFromProductProperties({
+      productPropertyList: (product as any).productPropertyList ?? (product as any).product_property_list,
+      propertyList: (product as any).propertyList ?? (product as any).property_list,
+      productOptions: (product as any).productOptions ?? (product as any).product_options,
+    });
+
     if (hasRows) {
       const fromRows = deriveAvailableOptionsFromVariants(
         (variantRows || []).map((row) => ({
           ...row,
           variantOptions: parseDynamicVariantOptions((row as any).variant_options),
         })),
-        { includeOutOfStockDimensions: false }
+        { includeOutOfStockDimensions: false, preferredOptionOrder }
       );
       if (fromRows.length > 0) return fromRows;
     }
 
     const variantsJson = (product as any).variants;
     if (Array.isArray(variantsJson) && variantsJson.length > 0) {
-      return deriveAvailableOptionsFromVariants(variantsJson, { includeOutOfStockDimensions: false });
+      return deriveAvailableOptionsFromVariants(variantsJson, {
+        includeOutOfStockDimensions: false,
+        preferredOptionOrder,
+      });
     }
 
     return [];
@@ -1875,6 +1886,62 @@ export default function ProductDetailsClient({
     return option.valuesForSelector.length > 0 && !value;
   });
 
+  const selectorRenderItems = useMemo(() => {
+    const items: Array<{ kind: 'color' | 'size' | 'extra'; name: string }> = [];
+    const emittedExtraKeys = new Set<string>();
+    let hasColor = false;
+    let hasSize = false;
+
+    for (const option of dynamicOptionDimensions) {
+      const key = normalizeOptionNameKey(option.name);
+
+      if (/color|colour/.test(key)) {
+        if (!hasColor && colorOptions.length > 0) {
+          items.push({ kind: 'color', name: option.name });
+          hasColor = true;
+        }
+        continue;
+      }
+
+      if (/size/.test(key)) {
+        if (!hasSize && currentSizes.length > 0) {
+          items.push({ kind: 'size', name: option.name });
+          hasSize = true;
+        }
+        continue;
+      }
+
+      const extraOption = extraDynamicOptions.find(
+        (candidate: DynamicAvailableOption & { valuesForSelector: string[] }) =>
+          normalizeOptionNameKey(candidate.name) === key
+      );
+      if (!extraOption || extraOption.valuesForSelector.length === 0) continue;
+      if (emittedExtraKeys.has(key)) continue;
+      emittedExtraKeys.add(key);
+      items.push({ kind: 'extra', name: extraOption.name });
+    }
+
+    if (!hasColor && colorOptions.length > 0) {
+      items.push({ kind: 'color', name: twoDimNames.color });
+      hasColor = true;
+    }
+
+    if (!hasSize && currentSizes.length > 0) {
+      items.push({ kind: 'size', name: twoDimNames.size });
+      hasSize = true;
+    }
+
+    for (const option of extraDynamicOptions) {
+      const key = normalizeOptionNameKey(option.name);
+      if (emittedExtraKeys.has(key)) continue;
+      if (option.valuesForSelector.length === 0) continue;
+      emittedExtraKeys.add(key);
+      items.push({ kind: 'extra', name: option.name });
+    }
+
+    return items;
+  }, [dynamicOptionDimensions, colorOptions, currentSizes, extraDynamicOptions, twoDimNames.color, twoDimNames.size]);
+
   // Disable add to cart if: out of stock, or required selectors are incomplete
   const addToCartDisabled = isOutOfStock || (currentSizes.length > 0 && !selectedSize) || hasUnselectedExtraOption;
 
@@ -1925,23 +1992,83 @@ export default function ProductDetailsClient({
             showRange={hasVariantPricing && !selectedVariant}
           />
 
-          {colorOptions.length > 0 && (
-            <ColorSelector
-              colors={colorOptions}
-              selectedColor={selectedColor}
-              onColorChange={setSelectedColor}
-              colorImages={colorImageMap}
-              hotColors={colorOptions.slice(0, 2)}
-            />
-          )}
+          {selectorRenderItems.map((item) => {
+            if (item.kind === 'color') {
+              return (
+                <ColorSelector
+                  key={`selector-color-${item.name}`}
+                  colors={colorOptions}
+                  selectedColor={selectedColor}
+                  onColorChange={setSelectedColor}
+                  colorImages={colorImageMap}
+                  hotColors={colorOptions.slice(0, 2)}
+                  label={item.name}
+                />
+              );
+            }
 
-          {extraDynamicOptions.map((option: DynamicAvailableOption & { valuesForSelector: string[] }) => {
+            if (item.kind === 'size') {
+              return (
+                <div key={`selector-size-${item.name}`} className="space-y-3">
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-2">
+                      <span className="text-sm font-medium text-foreground">{item.name}:</span>
+                      <span className="text-sm text-muted-foreground">{selectedSize}</span>
+                    </div>
+                    <SizeGuideModal />
+                  </div>
+                  <div className="flex flex-wrap gap-2">
+                    {currentSizes.map((size: string) => {
+                      const isSelected = size === selectedSize;
+                      const stockValue = Number(sizeStockMap[size]);
+                      const hasKnownStock = Number.isFinite(stockValue);
+                      const isOutOfStockSize = !hasKnownStock || stockValue <= 0;
+                      const isLowStock = hasKnownStock && stockValue > 0 && stockValue <= 3;
+
+                      return (
+                        <button
+                          key={size}
+                          onClick={() => !isOutOfStockSize && setSelectedSize(size)}
+                          disabled={isOutOfStockSize}
+                          className={cn(
+                            "relative min-w-[48px] px-4 py-2 rounded-md text-sm font-medium transition-all",
+                            isSelected
+                              ? "bg-primary text-primary-foreground"
+                              : isOutOfStockSize
+                                ? "bg-muted text-muted-foreground cursor-not-allowed line-through"
+                                : "bg-card border border-border hover:border-primary text-foreground"
+                          )}
+                        >
+                          {size}
+                          {isLowStock && !isSelected && (
+                            <span className="absolute -top-1 -right-1 w-2 h-2 bg-amber-500 rounded-full" />
+                          )}
+                        </button>
+                      );
+                    })}
+                  </div>
+                  {sizeStockMap[selectedSize] !== undefined && sizeStockMap[selectedSize] !== null && (sizeStockMap[selectedSize] as number) > 0 && (sizeStockMap[selectedSize] as number) <= 3 && (
+                    <p className="text-sm text-amber-600">
+                      Only {sizeStockMap[selectedSize]} left!
+                    </p>
+                  )}
+                </div>
+              );
+            }
+
+            const option = extraDynamicOptions.find(
+              (candidate: DynamicAvailableOption & { valuesForSelector: string[] }) =>
+                normalizeOptionNameKey(candidate.name) === normalizeOptionNameKey(item.name)
+            );
+            if (!option || !Array.isArray(option.valuesForSelector) || option.valuesForSelector.length === 0) {
+              return null;
+            }
+
             const selectedValue = String(selectedExtraOptions[option.name] || '').trim();
             const values = option.valuesForSelector;
-            if (!Array.isArray(values) || values.length === 0) return null;
 
             return (
-              <div key={option.name} className="space-y-3">
+              <div key={`selector-extra-${option.name}`} className="space-y-3">
                 <div className="flex items-center gap-2">
                   <span className="text-sm font-medium text-foreground">{option.name}:</span>
                   <span className="text-sm text-muted-foreground">{selectedValue}</span>
@@ -1973,53 +2100,6 @@ export default function ProductDetailsClient({
               </div>
             );
           })}
-
-          {currentSizes.length > 0 && (
-            <div className="space-y-3">
-              <div className="flex items-center justify-between">
-                <div className="flex items-center gap-2">
-                  <span className="text-sm font-medium text-foreground">{twoDimNames.size}:</span>
-                  <span className="text-sm text-muted-foreground">{selectedSize}</span>
-                </div>
-                <SizeGuideModal />
-              </div>
-              <div className="flex flex-wrap gap-2">
-                {currentSizes.map((size: string) => {
-                  const isSelected = size === selectedSize;
-                  const stockValue = Number(sizeStockMap[size]);
-                  const hasKnownStock = Number.isFinite(stockValue);
-                  const isOutOfStockSize = !hasKnownStock || stockValue <= 0;
-                  const isLowStock = hasKnownStock && stockValue > 0 && stockValue <= 3;
-
-                  return (
-                    <button
-                      key={size}
-                      onClick={() => !isOutOfStockSize && setSelectedSize(size)}
-                      disabled={isOutOfStockSize}
-                      className={cn(
-                        "relative min-w-[48px] px-4 py-2 rounded-md text-sm font-medium transition-all",
-                        isSelected
-                          ? "bg-primary text-primary-foreground"
-                          : isOutOfStockSize
-                            ? "bg-muted text-muted-foreground cursor-not-allowed line-through"
-                            : "bg-card border border-border hover:border-primary text-foreground"
-                      )}
-                    >
-                      {size}
-                      {isLowStock && !isSelected && (
-                        <span className="absolute -top-1 -right-1 w-2 h-2 bg-amber-500 rounded-full" />
-                      )}
-                    </button>
-                  );
-                })}
-              </div>
-              {sizeStockMap[selectedSize] !== undefined && sizeStockMap[selectedSize] !== null && (sizeStockMap[selectedSize] as number) > 0 && (sizeStockMap[selectedSize] as number) <= 3 && (
-                <p className="text-sm text-amber-600">
-                  Only {sizeStockMap[selectedSize]} left!
-                </p>
-              )}
-            </div>
-          )}
 
           <div className="hidden md:block">
             <ActionPanel

@@ -9,6 +9,8 @@ import { enhanceProductImageUrl } from '@/lib/media/image-quality';
 import {
   deriveAvailableOptionsFromVariants,
   deriveLegacyOptionArrays,
+  evaluateVariantStockEligibility,
+  extractPreferredOptionOrderFromProductProperties,
   parseDynamicAvailableOptions,
   type DynamicAvailableOption,
 } from '@/lib/variants/dynamic-options';
@@ -292,6 +294,9 @@ export async function addProductToQueue(batchId: number, product: {
   cjProductCost?: number;
   profitMargin?: number;
   colorImageMap?: Record<string, string>;
+  productPropertyList?: unknown;
+  propertyList?: unknown;
+  productOptions?: unknown;
 }): Promise<{ success: boolean; error?: string }> {
   const supabase = getSupabaseAdmin();
   if (!supabase) return { success: false, error: 'Supabase not configured' };
@@ -303,6 +308,30 @@ export async function addProductToQueue(batchId: number, product: {
   for (const v of product.variants) {
     if (!v?.variantSku) return { success: false, error: 'Missing required field: variantSku' };
     if (v?.sellPriceSAR == null) return { success: false, error: 'Missing required field: sellPriceSAR' };
+  }
+
+  const stockEligibility = evaluateVariantStockEligibility(
+    Array.isArray(product.variants)
+      ? product.variants.map((variant: any) => ({
+          variantOptions: variant?.variantOptions ?? variant?.variant_options,
+          variant_options: variant?.variant_options ?? variant?.variantOptions,
+          stock: variant?.stock,
+          totalStock: variant?.totalStock,
+          cjStock: variant?.cjStock,
+          factoryStock: variant?.factoryStock,
+          cj_stock: variant?.cj_stock,
+          factory_stock: variant?.factory_stock,
+          color: variant?.color,
+          size: variant?.size,
+          model: variant?.model,
+        }))
+      : []
+  );
+  if (stockEligibility.shouldBlockForOutOfStockOptions) {
+    return {
+      success: false,
+      error: `Excluded from queue: all configurable variants are out of stock for product ${product.productId}.`,
+    };
   }
 
   const normalizedVideoUrl = normalizeCjVideoUrl(product.videoUrl);
@@ -328,12 +357,17 @@ export async function addProductToQueue(batchId: number, product: {
 
   const productCode = await generateUniqueProductCode(admin);
   const storeSku = product.storeSku || productCode;
+  const preferredOptionOrder = extractPreferredOptionOrderFromProductProperties({
+    productPropertyList: product.productPropertyList,
+    propertyList: product.propertyList,
+    productOptions: product.productOptions,
+  });
   const normalizedAvailableOptions = (() => {
     const fromProduct = parseDynamicAvailableOptions(product.availableOptions);
     if (fromProduct.length > 0) return fromProduct;
     return deriveAvailableOptionsFromVariants(
       Array.isArray(product.variants) ? product.variants : [],
-      { includeOutOfStockDimensions: false }
+      { includeOutOfStockDimensions: false, preferredOptionOrder }
     );
   })();
   const legacyFromDynamicOptions = deriveLegacyOptionArrays(normalizedAvailableOptions);

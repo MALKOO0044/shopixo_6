@@ -16,6 +16,8 @@ import {
   buildOptionSignature,
   deriveAvailableOptionsFromVariants,
   deriveLegacyOptionArrays,
+  evaluateVariantStockEligibility,
+  extractPreferredOptionOrderFromProductProperties,
   extractVariantOptionsFromRawVariant,
 } from '@/lib/variants/dynamic-options';
 
@@ -2788,16 +2790,28 @@ async function handleSearch(req: Request, isPost: boolean) {
       const originCountry = String(source.originCountry || source.countryOrigin || source.originArea || '').trim() || undefined;
       const hsCode = source.entryCode ? `${source.entryCode}${source.entryNameEn ? ` (${source.entryNameEn})` : ''}` : undefined;
 
+      const preferredOptionOrder = extractPreferredOptionOrderFromProductProperties({
+        productPropertyList: source.productPropertyList,
+        propertyList: source.propertyList,
+        productOptions: source.productOptions,
+      });
+      const optionStockInputs = pricedVariants.map((variant) => ({
+        variantOptions: variant.variantOptions,
+        stock: variant.stock,
+        cjStock: variant.cjStock,
+        factoryStock: variant.factoryStock,
+        color: variant.color,
+        size: variant.size,
+      }));
+      const optionStockEligibility = evaluateVariantStockEligibility(optionStockInputs);
+      if (optionStockEligibility.shouldBlockForOutOfStockOptions) {
+        totalFiltered.stock++;
+        continue;
+      }
+
       const availableOptions = deriveAvailableOptionsFromVariants(
-        pricedVariants.map((variant) => ({
-          variantOptions: variant.variantOptions,
-          stock: variant.stock,
-          cjStock: variant.cjStock,
-          factoryStock: variant.factoryStock,
-          color: variant.color,
-          size: variant.size,
-        })),
-        { includeOutOfStockDimensions: false }
+        optionStockInputs,
+        { includeOutOfStockDimensions: false, preferredOptionOrder }
       );
       const legacyFromDynamicOptions = deriveLegacyOptionArrays(availableOptions);
       const resolvedAvailableSizes = legacyFromDynamicOptions.availableSizes;

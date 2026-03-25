@@ -744,6 +744,11 @@ export default function ProductDiscoveryPage() {
             `${data.productsSkippedVideoQualityGate} selected products were skipped because strict 4K quality gate failed.`
           );
         }
+        if (typeof data.productsSkippedOutOfStockConfigurable === 'number' && data.productsSkippedOutOfStockConfigurable > 0) {
+          skippedNotices.push(
+            `${data.productsSkippedOutOfStockConfigurable} selected products were skipped because all configurable variants are out of stock.`
+          );
+        }
         if (skippedNotices.length > 0) {
           setError(`Notice: ${skippedNotices.join(' ')}`);
         }

@@ -19,6 +19,7 @@ import {
   buildOptionSignature,
   deriveAvailableOptionsFromVariants,
   deriveLegacyOptionArrays,
+  extractPreferredOptionOrderFromProductProperties,
   extractVariantOptionsFromRawVariant,
 } from '@/lib/variants/dynamic-options';
 
@@ -385,6 +386,12 @@ export async function ensureHydrated(pid: string, opts: HydrateOptions = {}): Pr
   const rawProductNote = String(source.productNote || source.note || source.notes || '').trim();
   const productNote = sanitizeHtml(rawProductNote) || undefined;
 
+  const preferredOptionOrder = extractPreferredOptionOrderFromProductProperties({
+    productPropertyList: source.productPropertyList,
+    propertyList: source.propertyList,
+    productOptions: source.productOptions,
+  });
+
   const availableOptions = deriveAvailableOptionsFromVariants(
     variants.map((variant: any) => {
       const variantId = String(variant?.vid || variant?.variantId || variant?.id || '').trim();
@@ -407,7 +414,7 @@ export async function ensureHydrated(pid: string, opts: HydrateOptions = {}): Pr
         factoryStock: variantStock?.factoryStock,
       };
     }),
-    { includeOutOfStockDimensions: false }
+    { includeOutOfStockDimensions: false, preferredOptionOrder }
   );
   const derivedLegacyOptions = deriveLegacyOptionArrays(availableOptions);
   const resolvedAvailableColors = derivedLegacyOptions.availableColors;
