@@ -5,7 +5,6 @@ import SmartImage from "@/components/smart-image";
 import { enhanceProductImageUrl } from "@/lib/media/image-quality";
 import { normalizeDisplayedRating } from "@/lib/rating/engine";
 import { sarToUsd } from "@/lib/pricing";
-import { normalizeSizeList } from "@/lib/import/normalization";
 import type { PricedProduct } from "./types";
 import { deriveAvailableOptionsFromVariants, parseDynamicAvailableOptions } from "@/lib/variants/dynamic-options";
 
@@ -61,15 +60,6 @@ function PopularityDisplay({ listedNum }: { listedNum: number }) {
 }
 
 export default function PreviewPageOne({ product }: PreviewPageOneProps) {
-  const uniqueSizes = product.availableSizes && product.availableSizes.length > 0
-    ? normalizeSizeList(product.availableSizes)
-    : [];
-  const uniqueColors = product.availableColors && product.availableColors.length > 0
-    ? product.availableColors
-    : [];
-  const uniqueModels = product.availableModels && product.availableModels.length > 0
-    ? product.availableModels
-    : [];
   const dynamicAvailableOptions = (() => {
     const direct = parseDynamicAvailableOptions((product as any).availableOptions ?? (product as any).available_options);
     if (direct.length > 0) return direct;
@@ -78,19 +68,7 @@ export default function PreviewPageOne({ product }: PreviewPageOneProps) {
       Array.isArray((product as any).variants) ? ((product as any).variants as any[]) : [],
       { includeOutOfStockDimensions: false }
     );
-    if (variantDerived.length > 0) return variantDerived;
-
-    const fallback: Array<{ name: string; values: string[]; inStockValues: string[]; source?: string }> = [];
-    if (uniqueColors.length > 0) {
-      fallback.push({ name: "Color", values: uniqueColors, inStockValues: uniqueColors, source: "legacy" });
-    }
-    if (uniqueModels.length > 0) {
-      fallback.push({ name: "Model", values: uniqueModels, inStockValues: uniqueModels, source: "legacy" });
-    }
-    if (uniqueSizes.length > 0) {
-      fallback.push({ name: "Size", values: uniqueSizes, inStockValues: uniqueSizes, source: "legacy" });
-    }
-    return fallback;
+    return variantDerived;
   })();
   const visibleDynamicOptions = dynamicAvailableOptions
     .map((option) => ({

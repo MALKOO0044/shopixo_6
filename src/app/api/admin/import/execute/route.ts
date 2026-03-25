@@ -557,6 +557,7 @@ const FIDELITY_PARITY_FIELDS = [
   'review_count',
   'available_colors',
   'available_sizes',
+  'available_models',
   'color_image_map',
 ] as const;
 
@@ -651,6 +652,7 @@ export async function POST(req: NextRequest) {
       'review_count',
       'available_colors',
       'available_sizes',
+      'available_models',
       'color_image_map',
     ];
     const missingProductFidelityColumns: string[] = [];
@@ -710,6 +712,7 @@ export async function POST(req: NextRequest) {
       'review_count',
       'available_colors',
       'available_sizes',
+      'available_models',
       'color_image_map',
       'variant_pricing',
       'variants',
@@ -1162,6 +1165,7 @@ export async function POST(req: NextRequest) {
           available_options: availableOptions.length > 0 ? availableOptions : null,
           available_colors: resolvedAvailableColors,
           available_sizes: resolvedAvailableSizes,
+          available_models: resolvedAvailableModels,
           color_image_map: Object.keys(alignedColorImageMap).length > 0 ? alignedColorImageMap : null,
         };
 

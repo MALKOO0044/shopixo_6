@@ -771,12 +771,10 @@ function SizeSelector({ sizes, selectedSize, onSizeChange, sizeStock = {} }: Siz
       <div className="flex flex-wrap gap-2">
         {sizes.map((size) => {
           const isSelected = size === selectedSize;
-          // Treat stock=0, null, undefined as "available" (CJ often returns 0 as default)
-          const stockValue = sizeStock[size];
-          const hasExplicitStock = stockValue !== undefined && stockValue !== null && stockValue !== 0;
-          // Only mark out of stock if stock is explicitly negative (shouldn't happen)
-          const isOutOfStock = hasExplicitStock && stockValue < 0;
-          const isLowStock = hasExplicitStock && stockValue > 0 && stockValue <= 3;
+          const stockValue = Number(sizeStock[size]);
+          const hasKnownStock = Number.isFinite(stockValue);
+          const isOutOfStock = !hasKnownStock || stockValue <= 0;
+          const isLowStock = hasKnownStock && stockValue > 0 && stockValue <= 3;
 
           return (
             <button
@@ -1119,9 +1117,9 @@ export default function ProductDetailsClient({
   const dynamicOptionDimensions = useMemo(() => {
     return dynamicAvailableOptions
       .map((option: DynamicAvailableOption) => {
-        const sourceValues = Array.isArray(option.inStockValues) && option.inStockValues.length > 0
+        const sourceValues = Array.isArray(option.inStockValues)
           ? option.inStockValues
-          : (Array.isArray(option.values) ? option.values : []);
+          : [];
         const dedupe = new Map<string, string>();
         for (const value of sourceValues) {
           const clean = String(value || '').trim();
@@ -1159,8 +1157,10 @@ export default function ProductDetailsClient({
   // Primary: Check variant rows from product_variants table
   const bothDims = useMemo(() => {
     if (!hasRows) return false;
-    const withSep = (variantRows || []).filter(r => /\s\/\s|\s-\s/.test(String(r.option_value)));
-    return withSep.length >= Math.max(1, Math.floor((variantRows || []).length * 0.6));
+    const inStockRows = (variantRows || []).filter((row) => isVariantInStockStrict(row as any));
+    if (inStockRows.length === 0) return false;
+    const withSep = inStockRows.filter((row) => /\s\/\s|\s-\s/.test(String(row.option_value)));
+    return withSep.length >= Math.max(1, Math.floor(inStockRows.length * 0.6));
   }, [hasRows, variantRows]);
 
   // Extract colors from variant rows (primary source) - WITH DEDUPLICATION
@@ -1171,6 +1171,7 @@ export default function ProductDetailsClient({
     const colorMap = new Map<string, string>(); // normalized -> display
     
     for (const r of variantRows!) {
+      if (!isVariantInStockStrict(r as any)) continue;
       const cs = splitColorSize(r.option_value || '');
       if (cs.color) {
         const normalizedKey = cs.color.toLowerCase().trim().replace(/\s+/g, ' ');
@@ -1189,12 +1190,17 @@ export default function ProductDetailsClient({
     if (bothDims) {
       const sizes: string[] = [];
       for (const r of variantRows!) {
+        if (!isVariantInStockStrict(r as any)) continue;
         const cs = splitColorSize(r.option_value || '');
         if (cs.size) sizes.push(cs.size);
       }
       return normalizeAndDedupeSizes(sizes);
     }
-    return normalizeAndDedupeSizes(variantRows!.map(v => v.option_value));
+    return normalizeAndDedupeSizes(
+      variantRows!
+        .filter((variant) => isVariantInStockStrict(variant as any))
+        .map((variant) => variant.option_value)
+    );
   }, [hasRows, bothDims, variantRows]);
 
   // PRIMARY: Get available colors/sizes from product fields (available_colors, available_sizes arrays)
@@ -1263,11 +1269,12 @@ export default function ProductDetailsClient({
     return [];
   }, [product, hasRows, variantRowSizes, sizeDynamicOption]);
 
-  // Use variant rows as primary, fallback to product-level arrays
-  const hasFallbackDims = productColors.length > 0 && productSizes.length > 0;
-  const effectiveBothDims = bothDims || hasFallbackDims;
-
   const colorOptions = useMemo(() => {
+    if (hasRows) {
+      const inStockRowCount = (variantRows || []).filter((row) => isVariantInStockStrict(row as any)).length;
+      if (inStockRowCount === 0) return [];
+      if (variantRowColors.length > 0) return variantRowColors;
+    }
     // Use productColors as primary (from available_colors array)
     if (productColors.length > 0) return productColors;
     // Fallback to variantRows extraction
@@ -1275,92 +1282,65 @@ export default function ProductDetailsClient({
     // If no colors found (all were SKU codes), return empty array
     // The UI will handle this by showing only sizes (no color selector)
     return [];
-  }, [productColors, variantRowColors]);
+  }, [hasRows, variantRows, productColors, variantRowColors]);
 
-  // CJ PRODUCTS: ALL sizes are available for ALL colors
-  // We use the UNION of all sizes across the entire product for every color
+  // Use visible color options as fallback gating to avoid exposing stale dimensions.
+  const hasFallbackDims = colorOptions.length > 0 && productSizes.length > 0;
+  const effectiveBothDims = bothDims || hasFallbackDims;
+
   const sizeOptionsByColor = useMemo(() => {
-    // Step 1: Collect ALL unique sizes from all sources
-    const rawSizes: string[] = [];
-    
-    // From productSizes array (primary source from import)
-    if (productSizes.length > 0) {
-      rawSizes.push(...productSizes);
-    }
-    
-    // Also extract from variantRows to ensure completeness
-    if (hasRows && variantRows) {
-      for (const r of variantRows) {
-        const cs = splitColorSize(r.option_value || '');
-        if (cs.size) rawSizes.push(cs.size);
-      }
-    }
-    
-    // Also check variants JSONB field
-    const variantsJson = (product as any).variants;
-    if (Array.isArray(variantsJson)) {
-      for (const v of variantsJson) {
-        if (v.size && typeof v.size === 'string') rawSizes.push(v.size.trim());
-      }
-    }
+    const map: Record<string, string[]> = {};
 
-    const allSizes = normalizeAndDedupeSizes(rawSizes);
-    
-    // Step 2: Collect ALL colors from all sources (with deduplication)
-    const rawColors: string[] = [];
-    
-    // From productColors (primary - from available_colors array)
-    if (productColors.length > 0) {
-      rawColors.push(...productColors);
-    }
-    
-    // From variantRowColors (extracted from product_variants)
-    if (variantRowColors.length > 0) {
-      rawColors.push(...variantRowColors);
-    }
-    
-    // From variantRows (parse option_value) - use robust fallback for legacy data
     if (hasRows && variantRows) {
-      for (const r of variantRows) {
-        const optVal = r.option_value || '';
-        const cs = splitColorSize(optVal);
-        if (cs.color) {
-          rawColors.push(cs.color);
-        } else if (optVal.includes('-') || optVal.includes('/')) {
-          // Fallback: For legacy format "Color-Size" or "Color / Size", extract left part as color
-          const sep = optVal.includes('/') ? '/' : '-';
-          const parts = optVal.split(sep).map(p => p.trim()).filter(Boolean);
-          if (parts.length >= 2) {
-            // Last part is likely size, everything before is color
-            const potentialColor = parts.slice(0, -1).join(' ').trim();
-            if (potentialColor && potentialColor.length > 0) {
-              rawColors.push(potentialColor);
-            }
-          }
+      const colorBuckets = new Map<string, Map<string, string>>();
+
+      for (const row of variantRows) {
+        if (!isVariantInStockStrict(row as any)) continue;
+
+        const optionMap = parseDynamicVariantOptions((row as any).variant_options);
+        const colorFromMap = findOptionValueByNormalizedKey(optionMap, 'color');
+        const sizeFromMap = findOptionValueByNormalizedKey(optionMap, 'size');
+
+        const parsed = splitColorSize(row.option_value || '');
+        const color = String(colorFromMap || parsed.color || '').trim();
+        const size = String(sizeFromMap || parsed.size || '').trim();
+        if (!color || !size) continue;
+
+        const normalizedColor = color.toLowerCase().replace(/\s+/g, ' ');
+        if (!colorBuckets.has(normalizedColor)) {
+          colorBuckets.set(normalizedColor, new Map<string, string>());
+        }
+
+        const bucket = colorBuckets.get(normalizedColor)!;
+        const normalizedSize = size.toLowerCase();
+        if (!bucket.has(normalizedSize)) {
+          bucket.set(normalizedSize, size);
         }
       }
-    }
-    
-    // From variants JSONB field
-    if (Array.isArray(variantsJson)) {
-      for (const v of variantsJson) {
-        if (v.color && typeof v.color === 'string') rawColors.push(v.color.trim());
+
+      for (const [normalizedColor, sizes] of colorBuckets.entries()) {
+        const displayColor = colorOptions.find((color: string) => color.toLowerCase().replace(/\s+/g, ' ') === normalizedColor);
+        if (!displayColor) continue;
+        const normalizedSizes = normalizeAndDedupeSizes(Array.from(sizes.values()));
+        if (normalizedSizes.length > 0) {
+          map[displayColor] = normalizedSizes;
+        }
+      }
+
+      if (Object.keys(map).length > 0) {
+        return map;
       }
     }
-    
-    // Step 3: Assign ALL sizes to EVERY color - this is the CJ model
-    // Colors and sizes are independent dimensions
-    // CRITICAL: Use colorOptions as keys to ensure exact match with selectedColor
-    if (colorOptions.length > 0 && allSizes.length > 0) {
-      const map: Record<string, string[]> = {};
+
+    const fallbackSizes = normalizeAndDedupeSizes(productSizes);
+    if (colorOptions.length > 0 && fallbackSizes.length > 0) {
       for (const color of colorOptions) {
-        map[color] = allSizes;
+        map[color] = fallbackSizes;
       }
-      return map;
     }
-    
-    return {} as Record<string, string[]>;
-  }, [hasRows, variantRows, productColors, productSizes, variantRowColors, product, colorOptions]);
+
+    return map;
+  }, [hasRows, variantRows, productSizes, colorOptions]);
 
   const singleDimOptions = useMemo(() => {
     // Primary: Use variant row sizes
@@ -1508,12 +1488,14 @@ export default function ProductDetailsClient({
     const selectedSignature = buildOptionSignature(selectedOptions);
     if (selectedSignature) {
       const bySignature = variantRows.find((variant) => {
+        if (!isVariantInStockStrict(variant as any)) return false;
         const signature = String((variant as any).option_signature || '').trim();
         return signature.length > 0 && signature === selectedSignature;
       });
       if (bySignature) return bySignature;
 
       const byVariantOptions = variantRows.find((variant) => {
+        if (!isVariantInStockStrict(variant as any)) return false;
         const optionMap = parseDynamicVariantOptions((variant as any).variant_options);
         if (Object.keys(optionMap).length === 0) return false;
         if (selectedOptionsMatchVariantOptions(selectedOptions, optionMap)) return true;
@@ -1527,6 +1509,7 @@ export default function ProductDetailsClient({
       if (!selectedColor || !selectedSize) return null;
       const normalizedSelectedColor = selectedColor.toLowerCase().trim();
       return variantRows.find(v => {
+        if (!isVariantInStockStrict(v as any)) return false;
         const cs = splitColorSize(v.option_value || '');
         return String(cs.color || '').toLowerCase().trim() === normalizedSelectedColor && cs.size === selectedSize;
       }) || null;
@@ -1535,6 +1518,7 @@ export default function ProductDetailsClient({
     if (!selectedSize && selectedColor) {
       const normalizedSelectedColor = selectedColor.toLowerCase().trim();
       const legacyColorMatch = variantRows.find((variant) => {
+        if (!isVariantInStockStrict(variant as any)) return false;
         const optionNameKey = normalizeOptionNameKey((variant as any).option_name || '');
         if (!/color|colour/.test(optionNameKey)) return false;
         return String((variant as any).option_value || '').toLowerCase().trim() === normalizedSelectedColor;
@@ -1544,17 +1528,39 @@ export default function ProductDetailsClient({
 
     if (!selectedSize) return null;
     return variantRows.find((v) => {
+      if (!isVariantInStockStrict(v as any)) return false;
       const normalizedOptionSize =
         normalizeSingleSize(v.option_value, { allowNumeric: true }) || String(v.option_value || '').trim();
       return normalizedOptionSize === selectedSize;
     }) || null;
   }, [variantRows, selectedColor, selectedSize, bothDims, selectedOptions]);
 
-  // sizeStockMap: Maps size -> stock value
-  // CRITICAL: undefined/null stock means UNKNOWN (treat as available), NOT out of stock
-  // Only explicitly 0 stock means out of stock
+  // sizeStockMap: Maps size -> strict positive stock value only.
   const sizeStockMap = useMemo(() => {
-    const map: Record<string, number | undefined> = {};
+    const map: Record<string, number> = {};
+    const resolvePositiveStock = (variantLike: any): number | null => {
+      const directStock = Number(variantLike?.stock);
+      if (Number.isFinite(directStock)) {
+        return directStock > 0 ? directStock : null;
+      }
+
+      const cjStock = Number(variantLike?.cj_stock ?? variantLike?.cjStock);
+      const factoryStock = Number(variantLike?.factory_stock ?? variantLike?.factoryStock);
+      const hasCj = Number.isFinite(cjStock);
+      const hasFactory = Number.isFinite(factoryStock);
+      if (!hasCj && !hasFactory) return null;
+
+      const total = (hasCj ? Math.max(0, cjStock) : 0) + (hasFactory ? Math.max(0, factoryStock) : 0);
+      return total > 0 ? total : null;
+    };
+    const upsert = (sizeValue: string, stockValue: number | null) => {
+      const cleanSize = String(sizeValue || '').trim();
+      if (!cleanSize || !Number.isFinite(stockValue) || (stockValue as number) <= 0) return;
+      const prev = map[cleanSize];
+      if (!Number.isFinite(prev) || (stockValue as number) > prev) {
+        map[cleanSize] = stockValue as number;
+      }
+    };
     
     // Primary: Use variantRows from product_variants table
     if (hasRows) {
@@ -1573,7 +1579,8 @@ export default function ProductDetailsClient({
             continue;
           }
 
-          map[sizeValue] = r.stock ?? undefined;
+          if (!isVariantInStockStrict(r as any)) continue;
+          upsert(sizeValue, resolvePositiveStock(r));
         }
 
         if (Object.keys(map).length > 0) {
@@ -1588,8 +1595,8 @@ export default function ProductDetailsClient({
           const normalizedRowColor = (cs.color || '').toLowerCase().trim();
           const normalizedSelectedColor = selectedColor.toLowerCase().trim();
           if (normalizedRowColor === normalizedSelectedColor && cs.size) {
-            // Keep stock as-is: undefined means unknown, not 0
-            map[cs.size] = r.stock ?? undefined;
+            if (!isVariantInStockStrict(r as any)) continue;
+            upsert(cs.size, resolvePositiveStock(r));
           }
         }
       } else {
@@ -1597,7 +1604,8 @@ export default function ProductDetailsClient({
           const normalizedOptionSize =
             normalizeSingleSize(r.option_value, { allowNumeric: true }) || String(r.option_value || '').trim();
           if (!normalizedOptionSize) continue;
-          map[normalizedOptionSize] = r.stock ?? undefined;
+          if (!isVariantInStockStrict(r as any)) continue;
+          upsert(normalizedOptionSize, resolvePositiveStock(r));
         }
       }
       return map;
@@ -1612,21 +1620,22 @@ export default function ProductDetailsClient({
           const normalizedSelectedColor = selectedColor.toLowerCase().trim();
           const normalizedVSize = normalizeSingleSize(v.size, { allowNumeric: true }) || String(v.size || '').trim();
           if (normalizedVColor === normalizedSelectedColor && normalizedVSize) {
-            map[normalizedVSize] = v.stock ?? undefined;
+            if (!isVariantInStockStrict(v as any)) continue;
+            upsert(normalizedVSize, resolvePositiveStock(v));
           }
         }
       } else {
         for (const v of variants) {
           const normalizedVSize = normalizeSingleSize(v.size, { allowNumeric: true }) || String(v.size || '').trim();
           if (normalizedVSize) {
-            map[normalizedVSize] = v.stock ?? undefined;
+            if (!isVariantInStockStrict(v as any)) continue;
+            upsert(normalizedVSize, resolvePositiveStock(v));
           }
         }
       }
       if (Object.keys(map).length > 0) return map;
     }
     
-    // Last fallback: Empty map - sizes will be treated as available (unknown stock)
     return map;
   }, [
     hasRows,
@@ -1750,10 +1759,11 @@ export default function ProductDetailsClient({
 
       if (hasRows && Array.isArray(variantRows) && variantRows.length > 0) {
         const dedupe = new Map<string, string>();
-
+        let matchedDynamicRows = 0;
         for (const row of variantRows) {
           const optionMap = parseDynamicVariantOptions((row as any).variant_options);
           if (Object.keys(optionMap).length === 0) continue;
+          matchedDynamicRows += 1;
 
           const sizeValue = findOptionValueByNormalizedKey(optionMap, 'size');
           if (!sizeValue) continue;
@@ -1774,9 +1784,10 @@ export default function ProductDetailsClient({
         }
 
         const filteredSizes = Array.from(dedupe.values());
-        if (filteredSizes.length > 0) {
-          return filteredSizes;
+        if (matchedDynamicRows === 0) {
+          return baseSizes;
         }
+        return filteredSizes;
       }
 
       return baseSizes;
@@ -1840,20 +1851,15 @@ export default function ProductDetailsClient({
     return () => { cancelled = true; };
   }, [cjPid, selectedVariant?.cj_sku]);
 
-  // Check stock - null/undefined means "unknown availability" = treat as available (CJ products)
-  // Only mark out of stock when stock is EXPLICITLY 0
-  const productStockUnknown = product.stock === null || product.stock === undefined;
-  const hasProductStock = productStockUnknown || (product.stock ?? 0) > 0;
+  // Strict policy: in-stock means explicit stock > 0.
+  const hasProductStock = Number(product.stock) > 0;
   
   const hasVariantStock = hasRows && variantRows!.some(v => {
-    // null/undefined stock = unknown = available
-    if (v.stock === null || v.stock === undefined) return true;
-    return v.stock > 0;
+    return isVariantInStockStrict(v as any);
   });
   const hasFallbackVariantStock = !hasRows && Array.isArray((product as any).variants) && 
     (product as any).variants.some((v: any) => {
-      if (v.stock === null || v.stock === undefined) return true;
-      return v.stock > 0;
+      return isVariantInStockStrict(v as any);
     });
   
   const hasOptionsAvailable =
@@ -1980,12 +1986,10 @@ export default function ProductDetailsClient({
               <div className="flex flex-wrap gap-2">
                 {currentSizes.map((size: string) => {
                   const isSelected = size === selectedSize;
-                  // Treat stock=0, null, undefined as "available" (CJ often returns 0 as default)
-                  const stockValue = sizeStockMap[size];
-                  const hasExplicitStock = stockValue !== undefined && stockValue !== null && stockValue !== 0;
-                  // Only mark out of stock if stock is explicitly negative (shouldn't happen)
-                  const isOutOfStockSize = hasExplicitStock && stockValue < 0;
-                  const isLowStock = hasExplicitStock && stockValue > 0 && stockValue <= 3;
+                  const stockValue = Number(sizeStockMap[size]);
+                  const hasKnownStock = Number.isFinite(stockValue);
+                  const isOutOfStockSize = !hasKnownStock || stockValue <= 0;
+                  const isLowStock = hasKnownStock && stockValue > 0 && stockValue <= 3;
 
                   return (
                     <button

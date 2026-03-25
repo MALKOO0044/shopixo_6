@@ -682,6 +682,7 @@ export default function ProductDiscoveryPage() {
               availableSizes: p.availableSizes,
               availableColors: p.availableColors,
               availableModels: p.availableModels,
+              availableOptions: p.availableOptions,
               processingDays: p.processingTimeHours,
               deliveryDaysMin: undefined,
               deliveryDaysMax: p.deliveryTimeHours,
@@ -709,6 +710,8 @@ export default function ProductDiscoveryPage() {
                   cjStock: v.cjStock ?? null,
                   factoryStock: v.factoryStock ?? null,
                   colorImage: v.variantImage,
+                  variantOptions: (v as any).variantOptions ?? null,
+                  optionSignature: (v as any).optionSignature ?? null,
                 };
               }),
               specifications: plainSpecifications,

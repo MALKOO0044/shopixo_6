@@ -329,11 +329,16 @@ export async function POST(req: Request) {
                 variantOptions.Size = normalizedSize;
               }
               const optionSignature = buildOptionSignature(variantOptions);
+              const optionNames = Object.keys(variantOptions);
+              const optionName = optionNames.length > 0 ? optionNames.join(' / ') : 'Default';
+              const optionValue = optionNames.length > 0
+                ? optionNames.map((name) => variantOptions[name]).join(' / ')
+                : (normalizedSize || normalizedVariantKeySize || v.variantKey || '-');
               
               return {
                 product_id: productId,
-                option_name: 'Size',
-                option_value: normalizedSize || normalizedVariantKeySize || v.variantKey || '-',
+                option_name: optionName,
+                option_value: optionValue,
                 variant_options: Object.keys(variantOptions).length > 0 ? variantOptions : null,
                 option_signature: optionSignature || null,
                 cj_sku: v.cjSku || null,

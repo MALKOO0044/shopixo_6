@@ -48,6 +48,7 @@ import PriceComparison from "@/components/price-comparison";
 import type { Metadata } from 'next'
 import { getSiteUrl } from "@/lib/site";
 import { buildSyntheticFlashbackReviews, buildSyntheticReviewProfile } from "@/lib/reviews/synthetic-feedback";
+import { deriveAvailableOptionsFromVariants, parseDynamicVariantOptions } from "@/lib/variants/dynamic-options";
 import { createServerComponentClient } from "@supabase/auth-helpers-nextjs";
 import { cookies } from "next/headers";
 import { headers } from "next/headers";
@@ -254,24 +255,50 @@ export default async function ProductPage({ params, searchParams }: { params: { 
   try {
     const withColor = await supabase
       .from("product_variants")
-      .select("id, product_id, option_name, option_value, cj_sku, cj_variant_id, price, stock, image_url, color")
+      .select("id, product_id, option_name, option_value, variant_options, option_signature, cj_sku, cj_variant_id, price, stock, cj_stock, factory_stock, image_url, color")
       .eq("product_id", (product as any).id)
       .order("option_value", { ascending: true });
     if (withColor.error) {
-      const legacy = await supabase
+      const withDynamic = await supabase
         .from("product_variants")
-        .select("id, product_id, option_name, option_value, cj_sku, cj_variant_id, price, stock, image_url")
+        .select("id, product_id, option_name, option_value, variant_options, option_signature, cj_sku, cj_variant_id, price, stock, cj_stock, factory_stock, image_url")
         .eq("product_id", (product as any).id)
         .order("option_value", { ascending: true });
-      variantRows = (legacy.data as any) || [];
+      if (withDynamic.error) {
+        const legacy = await supabase
+          .from("product_variants")
+          .select("id, product_id, option_name, option_value, cj_sku, cj_variant_id, price, stock, image_url")
+          .eq("product_id", (product as any).id)
+          .order("option_value", { ascending: true });
+        variantRows = (legacy.data as any) || [];
+      } else {
+        variantRows = (withDynamic.data as any) || [];
+      }
     } else {
       variantRows = (withColor.data as any) || [];
     }
   } catch {}
   if ((!product.variants || product.variants.length === 0) && variantRows.length > 0) {
-    const name = variantRows[0].option_name || "Size";
-    const opts = Array.from(new Set(variantRows.map((r) => r.option_value))).filter(Boolean);
-    (product as any).variants = [{ name, options: opts }];
+    const dynamicFromRows = deriveAvailableOptionsFromVariants(
+      variantRows.map((row) => ({
+        ...row,
+        variantOptions: parseDynamicVariantOptions((row as any).variant_options),
+      })),
+      { includeOutOfStockDimensions: false }
+    );
+
+    if (dynamicFromRows.length > 0) {
+      (product as any).variants = dynamicFromRows
+        .filter((option) => Array.isArray(option.inStockValues) && option.inStockValues.length > 0)
+        .map((option) => ({
+          name: option.name,
+          options: option.inStockValues,
+        }));
+    } else {
+      const name = variantRows[0].option_name || "Size";
+      const opts = Array.from(new Set(variantRows.map((r) => r.option_value))).filter(Boolean);
+      (product as any).variants = [{ name, options: opts }];
+    }
   }
 
   // Combine deterministic synthetic baseline with real local reviews for storefront totals.

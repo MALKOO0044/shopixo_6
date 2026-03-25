@@ -126,14 +126,6 @@ export function extractNamedOptionPairsFromPropertyList(rawList: unknown, source
 export function extractVariantOptionsFromRawVariant(variant: any): DynamicVariantOptions {
   const pairs: OptionPair[] = [];
 
-  const pushKnown = (name: string, value: unknown) => pushPair(pairs, name, value, "variant");
-
-  pushKnown("Color", variant?.color ?? variant?.colour ?? variant?.colorNameEn ?? variant?.colorName);
-  pushKnown("Size", variant?.size ?? variant?.sizeNameEn ?? variant?.sizeName);
-  pushKnown("Model", variant?.model ?? variant?.modelNameEn ?? variant?.modelName);
-  pushKnown("Style", variant?.style ?? variant?.styleNameEn ?? variant?.styleName);
-  pushKnown("Format", variant?.format ?? variant?.formatNameEn ?? variant?.formatName);
-
   const dynamicSources: Array<{ list: unknown; source: string }> = [
     { list: variant?.variantPropertyList, source: "variantPropertyList" },
     { list: variant?.propertyList, source: "propertyList" },
@@ -145,6 +137,14 @@ export function extractVariantOptionsFromRawVariant(variant: any): DynamicVarian
   for (const source of dynamicSources) {
     pairs.push(...extractNamedOptionPairsFromPropertyList(source.list, source.source));
   }
+
+  const pushKnown = (name: string, value: unknown) => pushPair(pairs, name, value, "variant");
+
+  pushKnown("Color", variant?.color ?? variant?.colour ?? variant?.colorNameEn ?? variant?.colorName);
+  pushKnown("Size", variant?.size ?? variant?.sizeNameEn ?? variant?.sizeName);
+  pushKnown("Model", variant?.model ?? variant?.modelNameEn ?? variant?.modelName);
+  pushKnown("Style", variant?.style ?? variant?.styleNameEn ?? variant?.styleName);
+  pushKnown("Format", variant?.format ?? variant?.formatNameEn ?? variant?.formatName);
 
   if (pairs.length === 0) {
     const fallback = cleanText(variant?.variantKey ?? variant?.variantNameEn ?? variant?.variantName);
@@ -319,7 +319,7 @@ export function deriveLegacyOptionArrays(availableOptions: DynamicAvailableOptio
     for (const option of options) {
       const key = normalizeOptionNameKey(option.name);
       if (matcher.test(key)) {
-        return option.inStockValues.length > 0 ? option.inStockValues : option.values;
+        return option.inStockValues.length > 0 ? option.inStockValues : [];
       }
     }
     return [];
