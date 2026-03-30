@@ -45,6 +45,24 @@ type SelectedFeature = {
   supabaseCategorySlug: string;
 };
 
+type DiscoverBatchProgressDebug = {
+  id: string;
+  batchNumber: number;
+  previousCursor: string;
+  cursor: string;
+  cursorAdvanced: boolean;
+  hasMore: boolean;
+  sourceExhausted: boolean;
+  attemptedPidsCount: number;
+  productsReturned: number;
+  totalFound: number;
+  totalSeenPids: number;
+  consecutiveEmptyBatches: number;
+  consecutiveNoProgressBatches: number;
+  consecutiveCursorStalls: number;
+  shortfallReason: string | null;
+};
+
 const DISCOVER_NON_PRODUCT_IMAGE_RE = /(sprite|icon|favicon|logo|placeholder|blank|loading|badge|flag|promo|banner|sale|discount|qr|sizechart|size\s*chart|chart|table|guide|thumb|thumbnail|small|tiny|mini)/i;
 const DISCOVER_IMAGE_KEY_SIZE_TOKEN_RE = /[_-](\d{2,4})x(\d{2,4})(?=\.)/gi;
 
@@ -151,6 +169,26 @@ function buildDiscoverPreviewGallery(product: PricedProduct | null | undefined):
   return merged;
 }
 
+const DISCOVER_CJ_CATEGORY_ID_RE = /^\d+$/;
+
+function isValidDiscoverCjCategoryId(value: string): boolean {
+  return DISCOVER_CJ_CATEGORY_ID_RE.test(String(value || '').trim());
+}
+
+function normalizeDiscoverCategoryIds(rawCategoryIds: string[]): string[] {
+  const unique = new Set<string>();
+  for (const rawId of rawCategoryIds) {
+    const normalized = String(rawId || '').trim();
+    if (!isValidDiscoverCjCategoryId(normalized)) continue;
+    unique.add(normalized);
+  }
+  return Array.from(unique);
+}
+
+function normalizeDiscoverPid(value: unknown): string {
+  return String(value || '').trim();
+}
+
 export default function ProductDiscoveryPage() {
   const [category, setCategory] = useState("all");
   const [selectedFeatures, setSelectedFeatures] = useState<string[]>([]);
@@ -186,6 +224,7 @@ export default function ProductDiscoveryPage() {
   const [batchName, setBatchName] = useState("");
   const [saving, setSaving] = useState(false);
   const [savedBatchId, setSavedBatchId] = useState<number | null>(null);
+  const [batchProgressDebugLog, setBatchProgressDebugLog] = useState<DiscoverBatchProgressDebug[]>([]);
   
   const [previewProduct, setPreviewProduct] = useState<PricedProduct | null>(null);
   const [previewPage, setPreviewPage] = useState(1);
@@ -294,22 +333,31 @@ export default function ProductDiscoveryPage() {
       setError("Please select a category or feature to search");
       return;
     }
+
+    const rawCategoryIds = selectedFeatures.length > 0 ? selectedFeatures : [category];
+    const categoryIds = normalizeDiscoverCategoryIds(rawCategoryIds);
+    if (categoryIds.length === 0) {
+      setError("Selected filters do not include a valid CJ category ID. Please choose a mapped CJ category/feature.");
+      return;
+    }
     
     setLoading(true);
     setError(null);
     setProducts([]);
     setSelected(new Set());
     setSavedBatchId(null);
+    setBatchProgressDebugLog([]);
     
-    const categoryIds = selectedFeatures.length > 0 ? selectedFeatures : [category];
     const allProducts: PricedProduct[] = [];
     let hasMore = true;
     let cursor = "0.1.0"; // Initial cursor: categoryIndex.pageNum.itemOffset
-    let seenPids: string[] = []; // Track processed PIDs across batches
+    const seenPids = new Set<string>(); // Track processed PIDs across batches
     let batchNumber = 0;
     let lastError: string | null = null;
     let lastShortfallReason: string | null = null;
     let consecutiveEmptyBatches = 0; // Track stalls
+    let consecutiveNoProgressBatches = 0;
+    let consecutiveCursorStalls = 0;
     
     try {
       // Use batch mode to avoid Vercel timeout (10s limit)
@@ -339,11 +387,13 @@ export default function ProductDiscoveryPage() {
           cursor: cursor,
           remainingNeeded: remainingNeeded.toString(),
         });
+
+        const dedupedSeenPids = Array.from(seenPids);
         
         const res = await fetch(`/api/admin/cj/products/search-and-price?${params}`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ seenPids }),
+          body: JSON.stringify({ seenPids: dedupedSeenPids }),
         });
         
         // Check content-type before parsing JSON to avoid parse errors on timeouts/errors
@@ -385,40 +435,110 @@ export default function ProductDiscoveryPage() {
         
         // Update products in real-time so user sees progress
         setProducts([...allProducts]);
+
+        const batchMeta = data.batch && typeof data.batch === 'object' ? data.batch : null;
+        const previousCursor =
+          batchMeta && typeof batchMeta.previousCursor === 'string'
+            ? batchMeta.previousCursor
+            : cursor;
+        const nextCursor =
+          batchMeta && typeof batchMeta.cursor === 'string'
+            ? batchMeta.cursor
+            : cursor;
+        const cursorAdvanced =
+          batchMeta && typeof batchMeta.cursorAdvanced === 'boolean'
+            ? batchMeta.cursorAdvanced
+            : nextCursor !== previousCursor;
+        const attemptedPids = Array.isArray(batchMeta?.attemptedPids) ? batchMeta.attemptedPids : [];
+        const attemptedPidsCount = Number(batchMeta?.attemptedPidsCount);
+        const newAttempts = Number.isFinite(attemptedPidsCount) ? attemptedPidsCount : attemptedPids.length;
+        let sourceExhausted =
+          batchMeta && typeof batchMeta.sourceExhausted === 'boolean'
+            ? batchMeta.sourceExhausted
+            : false;
         
         // Check batch pagination info
-        if (data.batch) {
-          hasMore = data.batch.hasMore;
+        if (batchMeta) {
+          hasMore = Boolean(batchMeta.hasMore);
           // Update cursor for next batch (resume from where we left off)
-          if (data.batch.cursor) {
-            cursor = data.batch.cursor;
+          if (typeof batchMeta.cursor === 'string') {
+            cursor = batchMeta.cursor;
           }
-          // Accumulate ALL attempted PIDs (backup deduplication)
-          if (data.batch.attemptedPids) {
-            seenPids = [...seenPids, ...data.batch.attemptedPids];
+
+          for (const attemptedPid of attemptedPids) {
+            const normalizedPid = normalizeDiscoverPid(attemptedPid);
+            if (normalizedPid) {
+              seenPids.add(normalizedPid);
+            }
           }
-          console.log(`Batch ${batchNumber}: got ${batchProducts.length} products, hasMore=${hasMore}, cursor=${cursor}, totalSeen=${seenPids.length}`);
+
+          if (!sourceExhausted && !hasMore && !cursorAdvanced) {
+            sourceExhausted = true;
+          }
+
+          console.log(
+            `Batch ${batchNumber}: got ${batchProducts.length} products, hasMore=${hasMore}, previousCursor=${previousCursor}, cursor=${cursor}, cursorAdvanced=${cursorAdvanced}, sourceExhausted=${sourceExhausted}, attempts=${newAttempts}, totalSeen=${seenPids.size}`
+          );
         } else {
           // Non-batch response (fallback)
           hasMore = false;
+          sourceExhausted = true;
         }
         
-        // Trust the server's hasMore flag - it knows when categories are exhausted
-        // Only use client-side guards as last-resort safety nets
-        const newAttempts = data.batch?.attemptedPids?.length || 0;
+        const batchHadNoProgress = batchProducts.length === 0 && !cursorAdvanced && newAttempts === 0;
+
+        consecutiveNoProgressBatches = batchHadNoProgress ? consecutiveNoProgressBatches + 1 : 0;
+        consecutiveCursorStalls = !cursorAdvanced ? consecutiveCursorStalls + 1 : 0;
+        consecutiveEmptyBatches = batchProducts.length === 0 ? consecutiveEmptyBatches + 1 : 0;
+
+        const batchShortfallReason =
+          typeof data.shortfallReason === 'string' && data.shortfallReason.trim()
+            ? data.shortfallReason.trim()
+            : null;
+
+        setBatchProgressDebugLog((prev) => {
+          const nextEntry: DiscoverBatchProgressDebug = {
+            id: `${Date.now()}-${batchNumber}-${cursor}`,
+            batchNumber,
+            previousCursor,
+            cursor,
+            cursorAdvanced,
+            hasMore,
+            sourceExhausted,
+            attemptedPidsCount: newAttempts,
+            productsReturned: batchProducts.length,
+            totalFound: allProducts.length,
+            totalSeenPids: seenPids.size,
+            consecutiveEmptyBatches,
+            consecutiveNoProgressBatches,
+            consecutiveCursorStalls,
+            shortfallReason: batchShortfallReason,
+          };
+
+          const nextLog = [...prev, nextEntry];
+          return nextLog.length > 12 ? nextLog.slice(nextLog.length - 12) : nextLog;
+        });
+
         if (batchProducts.length === 0) {
-          consecutiveEmptyBatches++;
           console.log(`Batch returned 0 products (${newAttempts} attempts filtered), consecutiveEmpty=${consecutiveEmptyBatches}`);
           
-          // Only stop if BOTH: no new attempts AND server says no more
-          // This means cursor is exhausted and nothing left to try
+          if (consecutiveNoProgressBatches >= 3) {
+            lastShortfallReason = `Search stopped after ${consecutiveNoProgressBatches} no-progress batches (no cursor advance and no new candidate attempts).`;
+            console.log('No-progress guard triggered - stopping');
+            break;
+          }
+
+          if (hasMore && consecutiveCursorStalls >= 5) {
+            lastShortfallReason = `Search stopped after ${consecutiveCursorStalls} consecutive cursor stalls to prevent infinite looping.`;
+            console.log('Cursor-stall guard triggered - stopping');
+            break;
+          }
+
+          // Stop when no new attempts and server confirms no more pages
           if (newAttempts === 0 && !hasMore) {
             console.log('No new attempts and server says no more - stopping');
             break;
           }
-        } else {
-          // Reset counter on successful batch
-          consecutiveEmptyBatches = 0;
         }
         
         // Safety: limit total batches to prevent infinite loops
@@ -858,6 +978,8 @@ export default function ProductDiscoveryPage() {
   };
   
   const matchingSupabaseCategory = getMatchingSupabaseMainCategory();
+  const latestBatchProgressDebug =
+    batchProgressDebugLog.length > 0 ? batchProgressDebugLog[batchProgressDebugLog.length - 1] : null;
 
   return (
     <div className="p-6 max-w-7xl mx-auto space-y-6">
@@ -916,6 +1038,12 @@ export default function ProductDiscoveryPage() {
                     // Parse the value: "cjId:supabaseId:name"
                     const [cjId, supabaseId, ...nameParts] = e.target.value.split(':');
                     const name = nameParts.join(':');
+
+                    if (!isValidDiscoverCjCategoryId(cjId)) {
+                      setError(`Selected feature "${name}" does not map to a valid CJ category ID.`);
+                      e.target.value = "";
+                      return;
+                    }
                     
                     // Toggle the CJ feature ID
                     toggleFeature(cjId);
@@ -1193,6 +1321,41 @@ export default function ProductDiscoveryPage() {
           <p className="text-xs text-amber-600 mt-2">
             Searching products, calculating shipping costs, and applying {profitMargin}% profit margin. Final USD sell prices (with applied margin) will be added to the checklist exactly as shown.
           </p>
+        </div>
+      )}
+
+      {batchProgressDebugLog.length > 0 && (
+        <div className="bg-slate-50 border border-slate-200 rounded-lg p-3 space-y-2">
+          <div className="flex items-center justify-between">
+            <span className="text-xs font-semibold uppercase tracking-wide text-slate-700">Discover Batch Debug</span>
+            <span className="text-xs text-slate-500">Last {batchProgressDebugLog.length} batches</span>
+          </div>
+
+          {latestBatchProgressDebug && (
+            <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-6 gap-2 text-[11px] text-slate-700">
+              <div className="rounded border border-slate-200 bg-white px-2 py-1">Batch: <span className="font-mono">{latestBatchProgressDebug.batchNumber}</span></div>
+              <div className="rounded border border-slate-200 bg-white px-2 py-1">Returned: <span className="font-mono">{latestBatchProgressDebug.productsReturned}</span></div>
+              <div className="rounded border border-slate-200 bg-white px-2 py-1">Attempts: <span className="font-mono">{latestBatchProgressDebug.attemptedPidsCount}</span></div>
+              <div className="rounded border border-slate-200 bg-white px-2 py-1">Has More: <span className="font-mono">{latestBatchProgressDebug.hasMore ? "yes" : "no"}</span></div>
+              <div className="rounded border border-slate-200 bg-white px-2 py-1">Cursor Advanced: <span className="font-mono">{latestBatchProgressDebug.cursorAdvanced ? "yes" : "no"}</span></div>
+              <div className="rounded border border-slate-200 bg-white px-2 py-1">Source Exhausted: <span className="font-mono">{latestBatchProgressDebug.sourceExhausted ? "yes" : "no"}</span></div>
+            </div>
+          )}
+
+          {latestBatchProgressDebug?.shortfallReason && (
+            <p className="text-[11px] text-amber-700">Shortfall reason: {latestBatchProgressDebug.shortfallReason}</p>
+          )}
+
+          <div className="max-h-32 overflow-y-auto space-y-1">
+            {[...batchProgressDebugLog].reverse().map((entry) => (
+              <div
+                key={entry.id}
+                className="rounded border border-slate-200 bg-white px-2 py-1 font-mono text-[11px] text-slate-600"
+              >
+                B{entry.batchNumber} | {entry.previousCursor} -&gt; {entry.cursor} | +{entry.productsReturned} (total {entry.totalFound}) | attempts={entry.attemptedPidsCount} | hasMore={entry.hasMore ? 1 : 0} | advanced={entry.cursorAdvanced ? 1 : 0} | exhausted={entry.sourceExhausted ? 1 : 0} | empty={entry.consecutiveEmptyBatches} | stalls={entry.consecutiveCursorStalls}/{entry.consecutiveNoProgressBatches} | seen={entry.totalSeenPids}
+              </div>
+            ))}
+          </div>
         </div>
       )}
 

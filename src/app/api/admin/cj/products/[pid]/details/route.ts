@@ -304,6 +304,8 @@ export async function GET(
     let inventoryStatus: 'ok' | 'error' | 'partial' = 'ok';
     let inventoryErrorMessage: string | undefined;
     const variantStockMap = new Map<string, { cjStock: number; factoryStock: number; totalStock: number }>();
+    let variantStockLookupChecked = 0;
+    let variantStockLookupMatched = 0;
     
     const normalizeKey = (s: string | undefined | null): string => {
       if (!s) return '';
@@ -861,10 +863,15 @@ export async function GET(
 
       const variantStock = getVariantStock({
         vid: variantId,
+        variantId,
         sku: variantSku,
         variantKey: variant.variantKey,
         variantName: variantName,
       });
+      variantStockLookupChecked++;
+      if (variantStock) {
+        variantStockLookupMatched++;
+      }
       const resolvedVariantOptions = (() => {
         const base = variantOptionsByVariantId.get(variantId)?.options || extractVariantOptionsFromRawVariant(variant);
         if (color && !Object.keys(base).some((name) => /color|colour/i.test(name))) {
@@ -992,10 +999,15 @@ export async function GET(
         const variantSku = String(variant?.variantSku || variant?.sku || variantId || '');
         const variantStock = getVariantStock({
           vid: variantId,
+          variantId,
           sku: variantSku,
           variantKey: variant?.variantKey,
           variantName,
         });
+        variantStockLookupChecked++;
+        if (variantStock) {
+          variantStockLookupMatched++;
+        }
         return {
           variantOptions: base,
           stock: variantStock?.totalStock ?? variant?.stock,
@@ -1147,12 +1159,23 @@ export async function GET(
     };
 
     const duration = Date.now() - startTime;
+    const variantStockLookupUnmatched = Math.max(0, variantStockLookupChecked - variantStockLookupMatched);
+    console.log(
+      `[ProductDetails] Stock matching: ${variantStockLookupMatched}/${variantStockLookupChecked} matched (unmatched=${variantStockLookupUnmatched})`
+    );
     console.log(`[ProductDetails] Complete in ${duration}ms`);
 
     return NextResponse.json({
       ok: true,
       product: pricedProduct,
       duration,
+      debug: {
+        stockMatch: {
+          variantsChecked: variantStockLookupChecked,
+          variantsMatched: variantStockLookupMatched,
+          variantsUnmatched: variantStockLookupUnmatched,
+        },
+      },
     }, { headers: { 'Cache-Control': 'no-store' } });
 
   } catch (e: any) {

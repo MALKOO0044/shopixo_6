@@ -63,6 +63,33 @@ function PopularityDisplay({ listedNum }: { listedNum: number }) {
   );
 }
 
+type PreviewRenderableOption = {
+  name: string;
+  allValues: string[];
+  inStockValuesClean: string[];
+  displayValues: string[];
+  hasInStockValues: boolean;
+  stockStateLabel: string;
+  stockStateClassName: string;
+};
+
+function normalizeOptionValues(values: unknown): string[] {
+  if (!Array.isArray(values)) return [];
+
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const value of values) {
+    if (typeof value !== "string") continue;
+    const normalized = value.trim();
+    if (!normalized) continue;
+    const key = normalized.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(normalized);
+  }
+  return out;
+}
+
 export default function PreviewPageOne({ product }: PreviewPageOneProps) {
   const dynamicAvailableOptions = (() => {
     const direct = parseDynamicAvailableOptions((product as any).availableOptions ?? (product as any).available_options);
@@ -80,14 +107,45 @@ export default function PreviewPageOne({ product }: PreviewPageOneProps) {
     );
     return variantDerived;
   })();
-  const visibleDynamicOptions = dynamicAvailableOptions
-    .map((option) => ({
-      ...option,
-      visibleValues: Array.isArray(option.inStockValues)
-        ? option.inStockValues.filter((value) => typeof value === "string" && value.trim().length > 0)
-        : [],
-    }))
-    .filter((option) => option.visibleValues.length > 0);
+  const renderableDynamicOptions: PreviewRenderableOption[] = dynamicAvailableOptions
+    .map((option) => {
+      const inStockValuesClean = normalizeOptionValues(option.inStockValues);
+      const allValues = normalizeOptionValues(option.values);
+      const displayValues = inStockValuesClean.length > 0 ? inStockValuesClean : allValues;
+
+      return {
+        name: option.name,
+        allValues,
+        inStockValuesClean,
+        displayValues,
+        hasInStockValues: inStockValuesClean.length > 0,
+        stockStateLabel: inStockValuesClean.length > 0
+          ? `${inStockValuesClean.length} in stock`
+          : '0 in stock / unknown stock',
+        stockStateClassName: inStockValuesClean.length > 0 ? 'text-emerald-600' : 'text-amber-600',
+      };
+    })
+    .filter((option) => option.displayValues.length > 0);
+
+  const legacyFallbackOptionGroups: Array<{ name: string; values: string[] }> = [
+    { name: 'Color', values: normalizeOptionValues((product as any).availableColors ?? (product as any).available_colors) },
+    { name: 'Size', values: normalizeOptionValues((product as any).availableSizes ?? (product as any).available_sizes) },
+    { name: 'Model', values: normalizeOptionValues((product as any).availableModels ?? (product as any).available_models) },
+  ];
+
+  const legacyFallbackOptions: PreviewRenderableOption[] = legacyFallbackOptionGroups
+    .filter((entry) => entry.values.length > 0)
+    .map((entry) => ({
+      name: entry.name,
+      allValues: entry.values,
+      inStockValuesClean: [],
+      displayValues: entry.values,
+      hasInStockValues: false,
+      stockStateLabel: 'Legacy fallback values',
+      stockStateClassName: 'text-gray-500',
+    }));
+
+  const displayOptions = renderableDynamicOptions.length > 0 ? renderableDynamicOptions : legacyFallbackOptions;
 
   const imageCount = product.images?.length || 0;
   const previewSku = (() => {
@@ -107,7 +165,7 @@ export default function PreviewPageOne({ product }: PreviewPageOneProps) {
     : 0;
 
   console.log(
-    `[PreviewPageOne] Product ${product.cjSku}: listedNum=${product.listedNum}, displayedRating=${displayedRating}, confidence=${ratingConfidence}, optionDimensions=${visibleDynamicOptions.length}`
+    `[PreviewPageOne] Product ${product.cjSku}: listedNum=${product.listedNum}, displayedRating=${displayedRating}, confidence=${ratingConfidence}, optionDimensions=${displayOptions.length}`
   );
 
   return (
@@ -207,23 +265,26 @@ export default function PreviewPageOne({ product }: PreviewPageOneProps) {
           <p className="mt-2 text-xs text-gray-500">Final SKU is guaranteed unique and will be assigned when you add to queue.</p>
         </div>
 
-        {/* Dynamic options (strict in-stock values only) */}
-        {visibleDynamicOptions.length > 0 && (
+        {/* Available options */}
+        {displayOptions.length > 0 && (
           <div className="bg-white rounded-xl border border-gray-200 p-6 shadow-sm space-y-5">
             <div className="flex items-center gap-3">
               <Palette className="h-5 w-5 text-pink-600" />
               <span className="text-gray-500 font-medium">Available Options</span>
-              <span className="text-sm text-gray-400">({visibleDynamicOptions.length} dimensions)</span>
+              <span className="text-sm text-gray-400">({displayOptions.length} dimensions)</span>
             </div>
 
-            {visibleDynamicOptions.map((option) => (
+            {displayOptions.map((option) => (
               <div key={option.name} className="space-y-2">
                 <div className="flex items-center gap-2">
                   <span className="text-sm font-semibold text-gray-700">{option.name}:</span>
-                  <span className="text-xs text-gray-400">({option.visibleValues.length})</span>
+                  <span className="text-xs text-gray-400">({option.displayValues.length})</span>
+                  <span className={`text-xs ${option.stockStateClassName}`}>
+                    {option.stockStateLabel}
+                  </span>
                 </div>
                 <div className="flex flex-wrap gap-2">
-                  {option.visibleValues.map((value, idx) => (
+                  {option.displayValues.map((value, idx) => (
                     <span
                       key={`${option.name}-${idx}-${value}`}
                       className="bg-pink-50 text-pink-700 px-3 py-1.5 rounded-lg font-medium text-sm border border-pink-200"
@@ -237,8 +298,8 @@ export default function PreviewPageOne({ product }: PreviewPageOneProps) {
           </div>
         )}
 
-        {/* No in-stock options message */}
-        {visibleDynamicOptions.length === 0 && (
+        {/* No options message */}
+        {displayOptions.length === 0 && (
           <div className="bg-white rounded-xl border border-gray-200 p-6 shadow-sm">
             <div className="flex items-center gap-3 mb-3">
               <Ruler className="h-5 w-5 text-purple-600" />

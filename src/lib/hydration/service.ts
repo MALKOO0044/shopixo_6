@@ -108,6 +108,8 @@ export async function ensureHydrated(pid: string, opts: HydrateOptions = {}): Pr
   let inventoryErrorMessage: string | undefined;
 
   const variantStockMap = new Map<string, { cjStock: number; factoryStock: number; totalStock: number }>();
+  let variantStockLookupChecked = 0;
+  let variantStockLookupMatched = 0;
   const normalizeKey = (s: string | undefined | null): string => String(s ?? '').toLowerCase().trim().replace(/[\s\-_\.]/g, '');
   const getVariantStock = (identifiers: { vid?: string; variantId?: string; sku?: string; variantKey?: string; variantName?: string; }): { cjStock: number; factoryStock: number; totalStock: number } | undefined => {
     const keysToTry = [
@@ -405,6 +407,10 @@ export async function ensureHydrated(pid: string, opts: HydrateOptions = {}): Pr
         variantKey: variant?.variantKey,
         variantName,
       });
+      variantStockLookupChecked++;
+      if (variantStock) {
+        variantStockLookupMatched++;
+      }
 
       return {
         variantOptions: base?.options ?? extractVariantOptionsFromRawVariant(variant),
@@ -453,6 +459,24 @@ export async function ensureHydrated(pid: string, opts: HydrateOptions = {}): Pr
     const sellPriceUSD = shippingAvailable ? sarToUsd(sellPriceSAR) : 0;
     const profitUSD = shippingAvailable ? Number((sellPriceUSD - totalCostUSD).toFixed(2)) : 0;
     const marginPercent = sellPriceUSD > 0 ? Number(((profitUSD / sellPriceUSD) * 100).toFixed(2)) : 0;
+    let variantStock = getVariantStock({
+      vid: variantVid || pid,
+      variantId: variantVid || pid,
+      sku: source.productSku || pid,
+      variantKey: source.variantKey,
+      variantName: source.variantName || source.variantNameEn,
+    });
+    if (!variantStock && realInventory) {
+      variantStock = {
+        cjStock: realInventory.totalCJ,
+        factoryStock: realInventory.totalFactory,
+        totalStock: realInventory.totalAvailable,
+      };
+    }
+    variantStockLookupChecked++;
+    if (variantStock) {
+      variantStockLookupMatched++;
+    }
     pricedVariants.push({
       variantId: pid,
       variantSku: source.productSku || pid,
@@ -470,6 +494,9 @@ export async function ensureHydrated(pid: string, opts: HydrateOptions = {}): Pr
       profitUSD,
       marginPercent,
       error: shippingError,
+      stock: variantStock?.totalStock,
+      cjStock: variantStock?.cjStock,
+      factoryStock: variantStock?.factoryStock,
       variantOptions: {},
       optionSignature: '',
     });
@@ -536,6 +563,10 @@ export async function ensureHydrated(pid: string, opts: HydrateOptions = {}): Pr
         const profitUSD = Number((sellPriceUSD - totalCostUSD).toFixed(2));
         const marginPercent = sellPriceUSD > 0 ? Number(((profitUSD / sellPriceUSD) * 100).toFixed(2)) : 0;
         const variantStock = getVariantStock({ vid: variantId, variantId, sku: variantSku, variantKey: v.variantKey, variantName });
+        variantStockLookupChecked++;
+        if (variantStock) {
+          variantStockLookupMatched++;
+        }
         pricedVariants.push({
           variantId,
           variantSku,
@@ -694,7 +725,10 @@ export async function ensureHydrated(pid: string, opts: HydrateOptions = {}): Pr
 
   try { await setCache(cacheKey, pricedProduct, 60 * 60 * 12); } catch {}
   const duration = Date.now() - start;
-  console.log(`[Hydration] Hydrated ${pid} in ${duration}ms (variants=${variants.length}, priced=${pricedVariants.length})`);
+  const variantStockLookupUnmatched = Math.max(0, variantStockLookupChecked - variantStockLookupMatched);
+  console.log(
+    `[Hydration] Hydrated ${pid} in ${duration}ms (variants=${variants.length}, priced=${pricedVariants.length}, stockMatch=${variantStockLookupMatched}/${variantStockLookupChecked}, unmatched=${variantStockLookupUnmatched})`
+  );
 
   return pricedProduct;
 }

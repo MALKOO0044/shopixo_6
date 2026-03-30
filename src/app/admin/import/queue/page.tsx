@@ -166,6 +166,47 @@ function resolveQueueDynamicOptions(product: QueueProduct): DynamicAvailableOpti
   );
 }
 
+type QueueRenderableOption = DynamicAvailableOption & {
+  allValues: string[];
+  inStockValuesClean: string[];
+  displayValues: string[];
+  hasInStockValues: boolean;
+};
+
+function normalizeOptionValues(values: unknown): string[] {
+  if (!Array.isArray(values)) return [];
+
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const value of values) {
+    if (typeof value !== "string") continue;
+    const normalized = value.trim();
+    if (!normalized) continue;
+    const key = normalized.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(normalized);
+  }
+  return out;
+}
+
+function resolveQueueRenderableOptions(product: QueueProduct): QueueRenderableOption[] {
+  return resolveQueueDynamicOptions(product)
+    .map((option) => {
+      const inStockValuesClean = normalizeOptionValues(option.inStockValues);
+      const allValues = normalizeOptionValues(option.values);
+      const displayValues = inStockValuesClean.length > 0 ? inStockValuesClean : allValues;
+      return {
+        ...option,
+        allValues,
+        inStockValuesClean,
+        displayValues,
+        hasInStockValues: inStockValuesClean.length > 0,
+      };
+    })
+    .filter((option) => option.displayValues.length > 0);
+}
+
 function hasQueueVideo(product: QueueProduct): boolean {
   const primary = typeof product.video_4k_url === "string" ? product.video_4k_url.trim() : "";
   const fallback = typeof product.video_url === "string" ? product.video_url.trim() : "";
@@ -881,14 +922,7 @@ export default function QueuePage() {
                 const displayStoreSku = resolveQueueStoreSku(product);
                 const queueVideoUrl = getQueueVideoUrl(product);
                 const queueVariants = parseQueueVariants(product.variants);
-                const visibleDynamicOptions = resolveQueueDynamicOptions(product)
-                  .map((option) => ({
-                    ...option,
-                    visibleValues: Array.isArray(option.inStockValues)
-                      ? option.inStockValues.filter((value) => typeof value === "string" && value.trim().length > 0)
-                      : [],
-                  }))
-                  .filter((option) => option.visibleValues.length > 0);
+                const renderableDynamicOptions = resolveQueueRenderableOptions(product);
 
                 return editingId === product.id ? (
                   <tr key={product.id} className="bg-blue-50">
@@ -1056,16 +1090,19 @@ export default function QueuePage() {
                     </td>
                     <td className="px-4 py-3">
                       <div className="space-y-1">
-                        {visibleDynamicOptions.length > 0 ? (
-                          visibleDynamicOptions.map((option, optionIndex) => (
+                        {renderableDynamicOptions.length > 0 ? (
+                          renderableDynamicOptions.map((option, optionIndex) => (
                             <div key={`${product.id}-opt-${optionIndex}-${option.name}`} className="flex items-center gap-1 flex-wrap">
                               <span className="text-xs text-gray-500">{option.name}:</span>
-                              <span className="text-xs font-medium text-gray-700">{option.visibleValues.length}</span>
+                              <span className="text-xs font-medium text-gray-700">{option.displayValues.length}</span>
+                              <span className={`text-[10px] ${option.hasInStockValues ? 'text-emerald-600' : 'text-amber-600'}`}>
+                                {option.hasInStockValues ? `${option.inStockValuesClean.length} in stock` : '0 in stock / unknown stock'}
+                              </span>
                               <span
                                 className="text-xs text-gray-400 truncate max-w-[120px]"
-                                title={option.visibleValues.join(', ')}
+                                title={option.displayValues.join(', ')}
                               >
-                                ({option.visibleValues.slice(0, 3).join(', ')}{option.visibleValues.length > 3 ? '...' : ''})
+                                ({option.displayValues.slice(0, 3).join(', ')}{option.displayValues.length > 3 ? '...' : ''})
                               </span>
                             </div>
                           ))

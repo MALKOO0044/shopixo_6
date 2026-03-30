@@ -221,6 +221,18 @@ function parseDiscoverMediaMode(value: string | null): DiscoverMediaMode {
   return 'any';
 }
 
+const CJ_CATEGORY_ID_RE = /^\d+$/;
+
+function normalizeSearchCategoryIds(rawCategoryIds: string[]): string[] {
+  const unique = new Set<string>();
+  for (const rawCategoryId of rawCategoryIds) {
+    const normalized = String(rawCategoryId || '').trim();
+    if (!CJ_CATEGORY_ID_RE.test(normalized)) continue;
+    unique.add(normalized);
+  }
+  return Array.from(unique);
+}
+
 const SUPPLIER_RATING_KEYS = [
   'rating',
   'productRating',
@@ -391,8 +403,9 @@ async function fetchCjProductPage(
   const params = new URLSearchParams();
   params.set('pageNum', String(pageNum));
   
-  if (categoryId && categoryId !== 'all' && !categoryId.startsWith('first-') && !categoryId.startsWith('second-')) {
-    params.set('categoryId', categoryId);
+  const normalizedCategoryId = String(categoryId || '').trim();
+  if (CJ_CATEGORY_ID_RE.test(normalizedCategoryId)) {
+    params.set('categoryId', normalizedCategoryId);
   }
   
   const url = `${base}/product/list?${params}`;
@@ -656,7 +669,19 @@ async function handleSearch(req: Request, isPost: boolean) {
     }
     
     const categoryIdsParam = searchParams.get('categoryIds') || 'all';
-    const categoryIds = categoryIdsParam.split(',').filter(Boolean);
+    const rawCategoryIds = categoryIdsParam.split(',').map((value) => String(value || '').trim()).filter(Boolean);
+    const categoryIds = normalizeSearchCategoryIds(rawCategoryIds);
+    if (categoryIds.length === 0) {
+      const r = NextResponse.json(
+        {
+          ok: false,
+          error: 'No valid CJ category IDs provided. Please select mapped CJ categories only.',
+        },
+        { status: 400, headers: { 'Cache-Control': 'no-store' } }
+      );
+      r.headers.set('x-request-id', log.requestId);
+      return r;
+    }
     const quantity = Math.max(1, Math.min(5000, Number(searchParams.get('quantity') || 50)));
     const minPrice = Number(searchParams.get('minPrice') || 0);
     const maxPrice = Number(searchParams.get('maxPrice') || 1000);
@@ -682,6 +707,7 @@ async function handleSearch(req: Request, isPost: boolean) {
     // Example: "0.1.5" means category index 0, page 1, item offset 5
     const cursorParam = searchParams.get('cursor') || '0.1.0';
     const [cursorCatIdx, cursorPageNum, cursorItemOffset] = cursorParam.split('.').map(n => parseInt(n, 10) || 0);
+    const previousCursor = `${cursorCatIdx}.${cursorPageNum}.${cursorItemOffset}`;
     
     // remainingNeeded: how many more products the client needs (for exact quantity control)
     // If not provided, defaults to quantity (full request)
@@ -713,7 +739,11 @@ async function handleSearch(req: Request, isPost: boolean) {
         batch: {
           hasMore: false,
           cursor: cursorParam,
+          previousCursor,
+          cursorAdvanced: false,
+          sourceExhausted: true,
           attemptedPids: [],
+          attemptedPidsCount: 0,
           processedPids: [],
           totalCandidates: 0,
           productsThisBatch: 0,
@@ -802,6 +832,8 @@ async function handleSearch(req: Request, isPost: boolean) {
     const candidateProducts: any[] = [];
     const seenPids = new Set<string>();
     const startTime = Date.now();
+    let variantStockLookupChecked = 0;
+    let variantStockLookupMatched = 0;
     let skippedByQueueExclusion = 0;
     let skippedByStoreExclusion = 0;
     const mediaFilterStats = {
@@ -947,6 +979,12 @@ async function handleSearch(req: Request, isPost: boolean) {
     console.log(`[Search&Price]   Filtered as existing (queue/store): ${totalFiltered.existing}`);
     console.log(`[Search&Price]   Excluded by queue/store: ${skippedByQueueExclusion}/${skippedByStoreExclusion}`);
     console.log(`[Search&Price] ----------------------------------------`);
+
+    const nextCursor = `${currentCatIdx}.${currentPage}.${currentItemOffset}`;
+    const cursorAdvanced = nextCursor !== previousCursor;
+    const attemptedPidsCount = attemptedPidsThisBatch.length;
+    const sourceExhausted = exhaustedAllPages;
+    const noProgressInBatch = !cursorAdvanced && attemptedPidsCount === 0;
     
     if (candidateProducts.length === 0) {
       console.log(`[Search&Price] No candidates found! Returning empty result.`);
@@ -955,10 +993,34 @@ async function handleSearch(req: Request, isPost: boolean) {
         products: [],
         count: 0,
         mediaMode,
+        shortfallReason: noProgressInBatch
+          ? 'Search stopped because no additional candidates were attempted and pagination did not advance.'
+          : 'No matching candidates found for this batch.',
         duration: Date.now() - startTime,
+        batch: isBatchMode ? {
+          hasMore: !sourceExhausted && !noProgressInBatch,
+          cursor: nextCursor,
+          previousCursor,
+          cursorAdvanced,
+          sourceExhausted,
+          attemptedPids: attemptedPidsThisBatch,
+          attemptedPidsCount,
+          processedPids: [],
+          totalCandidates: 0,
+          productsThisBatch: 0,
+          batchSize,
+        } : undefined,
         debug: {
           categoriesSearched: categoryIds,
           totalSeen: seenPids.size,
+          progress: {
+            previousCursor,
+            nextCursor,
+            cursorAdvanced,
+            sourceExhausted,
+            attemptedPidsCount,
+            noProgressInBatch,
+          },
           filtered: totalFiltered,
           exclusion: {
             excludedByQueue: queueExcludedPids.size,
@@ -1072,9 +1134,13 @@ async function handleSearch(req: Request, isPost: boolean) {
         mediaMode,
         duration: Date.now() - startTime,
         batch: isBatchMode ? {
-          hasMore: !exhaustedAllPages && (candidateProducts.length > liteProducts.length),
-          cursor: `${currentCatIdx}.${currentPage}.${currentItemOffset}`,
+          hasMore: (!sourceExhausted || candidateProducts.length > liteProducts.length) && !noProgressInBatch,
+          cursor: nextCursor,
+          previousCursor,
+          cursorAdvanced,
+          sourceExhausted,
           attemptedPids: attemptedPidsThisBatch,
+          attemptedPidsCount,
           processedPids: liteProducts.map((p) => p.pid),
           totalCandidates: candidateProducts.length,
           productsThisBatch: liteProducts.length,
@@ -2406,7 +2472,10 @@ async function handleSearch(req: Request, isPost: boolean) {
           // Single-variant product: try productSku, pid, or first available stock entry (aggregate if multiple rows)
           let variantStock = getVariantStock({
             vid: pid,
+            variantId: pid,
             sku: item.productSku,
+            variantKey: item.variantKey,
+            variantName: item.variantName || item.variantNameEn,
           });
           if (!variantStock && variantStockMap.size > 0) {
             // For single-variant products with multiple inventory rows (e.g., different warehouses),
@@ -2427,6 +2496,10 @@ async function handleSearch(req: Request, isPost: boolean) {
               factoryStock: realInventory.totalFactory,
               totalStock: realInventory.totalAvailable,
             };
+          }
+          variantStockLookupChecked++;
+          if (variantStock) {
+            variantStockLookupMatched++;
           }
           
           pricedVariants.push({
@@ -2640,6 +2713,10 @@ async function handleSearch(req: Request, isPost: boolean) {
               variantKey,
               variantName,
             });
+            variantStockLookupChecked++;
+            if (variantStock) {
+              variantStockLookupMatched++;
+            }
 
             pricedVariants.push({
               variantId,
@@ -2928,6 +3005,7 @@ async function handleSearch(req: Request, isPost: boolean) {
     const hitRateLimit = consecutiveRateLimitErrors >= 3;
     const hitTimeLimit = Date.now() - startTime > maxDurationMs;
     const exhaustedCandidates = candidateIndex >= candidateProducts.length;
+    const variantStockLookupUnmatched = Math.max(0, variantStockLookupChecked - variantStockLookupMatched);
     
     // Determine shortfall reason
     let shortfallReason: string | undefined;
@@ -2936,6 +3014,8 @@ async function handleSearch(req: Request, isPost: boolean) {
         shortfallReason = 'CJ API rate limit reached. Try again in a few minutes.';
       } else if (hitTimeLimit) {
         shortfallReason = `Processing time exceeded. Got ${filteredProducts.length}/${quantity} products.`;
+      } else if (isBatchMode && noProgressInBatch) {
+        shortfallReason = 'Search stopped because no additional candidates were attempted and pagination did not advance.';
       } else if (mediaMode !== 'any' && mediaFilterStats.passed === 0) {
         shortfallReason = `No products matched media filter "${mediaMode}". Checked ${mediaFilterStats.checked} candidates and filtered out ${mediaFilterStats.filteredOut}.`;
       } else if (exhaustedCandidates) {
@@ -2981,8 +3061,8 @@ async function handleSearch(req: Request, isPost: boolean) {
     // 2. There are unprocessed candidates remaining from this batch
     // AND we're not rate limited
     const hasMoreCandidatesInBatch = candidateIndex < candidateProducts.length;
-    const moreSourcePagesExist = !exhaustedAllPages;
-    const hasMoreToProcess = (moreSourcePagesExist || hasMoreCandidatesInBatch) && !hitRateLimit;
+    const moreSourcePagesExist = !sourceExhausted;
+    const hasMoreToProcess = (moreSourcePagesExist || hasMoreCandidatesInBatch) && !hitRateLimit && !noProgressInBatch;
     
     // Return ALL attempted PIDs (including filtered/failed) so client can skip them in next batch
     // This is simpler and more reliable than complex cursor tracking
@@ -3007,11 +3087,15 @@ async function handleSearch(req: Request, isPost: boolean) {
       excludedTotal: excludedPids.size,
       // Batch mode pagination info
       batch: isBatchMode ? {
-        hasMore: hasMoreToProcess && !hitRateLimit,
+        hasMore: hasMoreToProcess,
         // Cursor for resuming: categoryIndex.pageNum.itemOffset
-        cursor: `${currentCatIdx}.${currentPage}.${currentItemOffset}`,
+        cursor: nextCursor,
+        previousCursor,
+        cursorAdvanced,
+        sourceExhausted,
         // Return ALL attempted PIDs so client can skip them (backup deduplication)
         attemptedPids: attemptedPidsThisBatch,
+        attemptedPidsCount,
         processedPids: productsToReturn.map(p => p.pid),
         totalCandidates: candidateProducts.length,
         productsThisBatch: productsProcessedThisBatch,
@@ -3021,6 +3105,20 @@ async function handleSearch(req: Request, isPost: boolean) {
         candidatesFound: candidateProducts.length,
         productsProcessed: candidateIndex,
         pricedSuccessfully: pricedProducts.length,
+        progress: {
+          previousCursor,
+          nextCursor,
+          cursorAdvanced,
+          sourceExhausted,
+          noProgressInBatch,
+          attemptedPidsCount,
+          hasMoreCandidatesInBatch,
+        },
+        stockMatch: {
+          variantsChecked: variantStockLookupChecked,
+          variantsMatched: variantStockLookupMatched,
+          variantsUnmatched: variantStockLookupUnmatched,
+        },
         skippedNoShipping,
         filteredBySizes,
         filteredExisting: totalFiltered.existing,
