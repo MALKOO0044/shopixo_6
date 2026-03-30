@@ -74,11 +74,32 @@ type PreviewRenderableOption = {
 };
 
 function normalizeOptionValues(values: unknown): string[] {
-  if (!Array.isArray(values)) return [];
+  let source: unknown[] = [];
+
+  if (Array.isArray(values)) {
+    source = values;
+  } else if (typeof values === "string") {
+    const trimmed = values.trim();
+    if (!trimmed) {
+      source = [];
+    } else if (trimmed.startsWith("[") && trimmed.endsWith("]")) {
+      try {
+        const parsed = JSON.parse(trimmed);
+        source = Array.isArray(parsed) ? parsed : [];
+      } catch {
+        source = [];
+      }
+    } else {
+      source = trimmed
+        .split(/[|,]+/)
+        .map((value) => value.trim())
+        .filter(Boolean);
+    }
+  }
 
   const out: string[] = [];
   const seen = new Set<string>();
-  for (const value of values) {
+  for (const value of source) {
     if (typeof value !== "string") continue;
     const normalized = value.trim();
     if (!normalized) continue;
@@ -103,7 +124,7 @@ export default function PreviewPageOne({ product }: PreviewPageOneProps) {
 
     const variantDerived = deriveAvailableOptionsFromVariants(
       Array.isArray((product as any).variants) ? ((product as any).variants as any[]) : [],
-      { includeOutOfStockDimensions: false, preferredOptionOrder }
+      { includeOutOfStockDimensions: true, preferredOptionOrder }
     );
     return variantDerived;
   })();
@@ -145,7 +166,9 @@ export default function PreviewPageOne({ product }: PreviewPageOneProps) {
       stockStateClassName: 'text-gray-500',
     }));
 
-  const displayOptions = renderableDynamicOptions.length > 0 ? renderableDynamicOptions : legacyFallbackOptions;
+  const hasDynamicRenderableOptions = renderableDynamicOptions.length > 0;
+  const hasLegacyFallbackOptions = legacyFallbackOptions.length > 0;
+  const displayOptions = hasDynamicRenderableOptions ? renderableDynamicOptions : legacyFallbackOptions;
 
   const imageCount = product.images?.length || 0;
   const previewSku = (() => {
@@ -299,7 +322,7 @@ export default function PreviewPageOne({ product }: PreviewPageOneProps) {
         )}
 
         {/* No options message */}
-        {displayOptions.length === 0 && (
+        {!hasDynamicRenderableOptions && !hasLegacyFallbackOptions && (
           <div className="bg-white rounded-xl border border-gray-200 p-6 shadow-sm">
             <div className="flex items-center gap-3 mb-3">
               <Ruler className="h-5 w-5 text-purple-600" />

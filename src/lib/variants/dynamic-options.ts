@@ -448,11 +448,36 @@ export function deriveLegacyOptionArrays(availableOptions: DynamicAvailableOptio
 } {
   const options = Array.isArray(availableOptions) ? availableOptions : [];
 
+  const resolveNormalizedValues = (option: DynamicAvailableOption): string[] => {
+    const out: string[] = [];
+    const seen = new Set<string>();
+
+    const push = (rawValues: unknown) => {
+      const values = Array.isArray(rawValues) ? rawValues : [];
+      for (const rawValue of values) {
+        const normalized = cleanText(rawValue);
+        if (!normalized) continue;
+        const key = normalizeValueKey(normalized);
+        if (!key || seen.has(key)) continue;
+        seen.add(key);
+        out.push(normalized);
+      }
+    };
+
+    if (Array.isArray(option.inStockValues) && option.inStockValues.length > 0) {
+      push(option.inStockValues);
+    } else {
+      push(option.values);
+    }
+
+    return out;
+  };
+
   const findValues = (matcher: RegExp): string[] => {
     for (const option of options) {
       const key = normalizeOptionNameKey(option.name);
       if (matcher.test(key)) {
-        return option.inStockValues.length > 0 ? option.inStockValues : [];
+        return resolveNormalizedValues(option);
       }
     }
     return [];

@@ -68,6 +68,52 @@ function ImageWithFallback({ src, alt, className }: { src: string; alt: string; 
 
 type TabType = 'overview' | 'images' | 'specs' | 'inventory' | 'shipping' | 'variants' | 'aiMedia'
 
+type CjRenderableOption = {
+  name: string
+  allValues: string[]
+  inStockValuesClean: string[]
+  displayValues: string[]
+  hasInStockValues: boolean
+}
+
+function normalizeOptionValues(values: unknown): string[] {
+  let source: unknown[] = []
+
+  if (Array.isArray(values)) {
+    source = values
+  } else if (typeof values === 'string') {
+    const trimmed = values.trim()
+    if (!trimmed) {
+      source = []
+    } else if (trimmed.startsWith('[') && trimmed.endsWith(']')) {
+      try {
+        const parsed = JSON.parse(trimmed)
+        source = Array.isArray(parsed) ? parsed : []
+      } catch {
+        source = []
+      }
+    } else {
+      source = trimmed
+        .split(/[|,]+/)
+        .map((value) => value.trim())
+        .filter(Boolean)
+    }
+  }
+
+  const out: string[] = []
+  const seen = new Set<string>()
+  for (const value of source) {
+    if (typeof value !== 'string') continue
+    const normalized = value.trim()
+    if (!normalized) continue
+    const key = normalized.toLowerCase()
+    if (seen.has(key)) continue
+    seen.add(key)
+    out.push(normalized)
+  }
+  return out
+}
+
 function resolveDynamicAvailableOptions(product: PricedProduct | null | undefined) {
   if (!product) return []
 
@@ -82,7 +128,7 @@ function resolveDynamicAvailableOptions(product: PricedProduct | null | undefine
 
   return deriveAvailableOptionsFromVariants(
     Array.isArray(product.variants) ? product.variants : [],
-    { includeOutOfStockDimensions: false, preferredOptionOrder }
+    { includeOutOfStockDimensions: true, preferredOptionOrder }
   )
 }
 
@@ -297,14 +343,20 @@ export default function CjProductAdminPage({ params }: { params: { pid: string }
     ? normalizeDisplayedRating(product.displayedRating)
     : null
   const dynamicAvailableOptions = resolveDynamicAvailableOptions(product)
-  const visibleDynamicOptions = dynamicAvailableOptions
+  const renderableDynamicOptions: CjRenderableOption[] = dynamicAvailableOptions
+    .map((option) => ({
+      name: option.name,
+      allValues: normalizeOptionValues(option.values),
+      inStockValuesClean: normalizeOptionValues(option.inStockValues),
+      displayValues: [],
+      hasInStockValues: false,
+    }))
     .map((option) => ({
       ...option,
-      visibleValues: Array.isArray(option.inStockValues)
-        ? option.inStockValues.filter((value) => typeof value === 'string' && value.trim().length > 0)
-        : [],
+      displayValues: option.inStockValuesClean.length > 0 ? option.inStockValuesClean : option.allValues,
+      hasInStockValues: option.inStockValuesClean.length > 0,
     }))
-    .filter((option) => option.visibleValues.length > 0)
+    .filter((option) => option.displayValues.length > 0)
 
   return (
     <div className="min-h-screen bg-gray-50">
@@ -610,24 +662,31 @@ export default function CjProductAdminPage({ params }: { params: { pid: string }
               </div>
             )}
 
-            {visibleDynamicOptions.length > 0 && (
+            {renderableDynamicOptions.length > 0 && (
               <div className="bg-white rounded-xl border shadow-sm p-6">
                 <h3 className="text-lg font-semibold text-gray-900 mb-4">Available Options</h3>
                 <div className="space-y-4">
-                  {visibleDynamicOptions.map((option) => (
+                  {renderableDynamicOptions.map((option) => (
                     <div key={option.name}>
-                      <span className="text-sm font-medium text-gray-700">
-                        {option.name} ({option.visibleValues.length})
-                      </span>
+                      <div className="flex items-center gap-2">
+                        <span className="text-sm font-medium text-gray-700">
+                          {option.name} ({option.displayValues.length})
+                        </span>
+                        <span className={`text-xs ${option.hasInStockValues ? 'text-emerald-600' : 'text-amber-600'}`}>
+                          {option.hasInStockValues
+                            ? `${option.inStockValuesClean.length} in stock`
+                            : '0 in stock / unknown stock'}
+                        </span>
+                      </div>
                       <div className="flex flex-wrap gap-2 mt-2">
-                        {option.visibleValues.slice(0, 10).map((value, idx) => (
+                        {option.displayValues.slice(0, 10).map((value, idx) => (
                           <span key={`${option.name}-${idx}-${value}`} className="px-3 py-1 bg-gray-100 text-gray-700 text-sm rounded-full">
                             {value}
                           </span>
                         ))}
-                        {option.visibleValues.length > 10 && (
+                        {option.displayValues.length > 10 && (
                           <span className="px-3 py-1 bg-gray-200 text-gray-600 text-sm rounded-full">
-                            +{option.visibleValues.length - 10} more
+                            +{option.displayValues.length - 10} more
                           </span>
                         )}
                       </div>

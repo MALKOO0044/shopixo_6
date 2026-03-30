@@ -56,6 +56,8 @@ type QueueProduct = {
   created_at: string;
   available_colors?: string[];
   available_sizes?: string[];
+  available_models?: string[];
+  availableModels?: string[];
   available_options?: unknown;
   availableOptions?: unknown;
   product_property_list?: unknown;
@@ -162,7 +164,7 @@ function resolveQueueDynamicOptions(product: QueueProduct): DynamicAvailableOpti
 
   return deriveAvailableOptionsFromVariants(
     parseQueueVariants(product.variants),
-    { includeOutOfStockDimensions: false, preferredOptionOrder }
+    { includeOutOfStockDimensions: true, preferredOptionOrder }
   );
 }
 
@@ -174,11 +176,32 @@ type QueueRenderableOption = DynamicAvailableOption & {
 };
 
 function normalizeOptionValues(values: unknown): string[] {
-  if (!Array.isArray(values)) return [];
+  let source: unknown[] = [];
+
+  if (Array.isArray(values)) {
+    source = values;
+  } else if (typeof values === "string") {
+    const trimmed = values.trim();
+    if (!trimmed) {
+      source = [];
+    } else if (trimmed.startsWith("[") && trimmed.endsWith("]")) {
+      try {
+        const parsed = JSON.parse(trimmed);
+        source = Array.isArray(parsed) ? parsed : [];
+      } catch {
+        source = [];
+      }
+    } else {
+      source = trimmed
+        .split(/[|,]+/)
+        .map((value) => value.trim())
+        .filter(Boolean);
+    }
+  }
 
   const out: string[] = [];
   const seen = new Set<string>();
-  for (const value of values) {
+  for (const value of source) {
     if (typeof value !== "string") continue;
     const normalized = value.trim();
     if (!normalized) continue;
@@ -923,6 +946,9 @@ export default function QueuePage() {
                 const queueVideoUrl = getQueueVideoUrl(product);
                 const queueVariants = parseQueueVariants(product.variants);
                 const renderableDynamicOptions = resolveQueueRenderableOptions(product);
+                const fallbackColors = normalizeOptionValues(product.available_colors);
+                const fallbackSizes = normalizeOptionValues(product.available_sizes);
+                const fallbackModels = normalizeOptionValues(product.available_models ?? product.availableModels);
 
                 return editingId === product.id ? (
                   <tr key={product.id} className="bg-blue-50">
@@ -1108,25 +1134,34 @@ export default function QueuePage() {
                           ))
                         ) : (
                           <>
-                            {product.available_colors && product.available_colors.length > 0 && (
+                            {fallbackColors.length > 0 && (
                               <div className="flex items-center gap-1 flex-wrap">
                                 <span className="text-xs text-gray-500">Colors:</span>
-                                <span className="text-xs font-medium text-gray-700">{product.available_colors.length}</span>
-                                <span className="text-xs text-gray-400 truncate max-w-[120px]" title={product.available_colors.join(', ')}>
-                                  ({product.available_colors.slice(0, 3).join(', ')}{product.available_colors.length > 3 ? '...' : ''})
+                                <span className="text-xs font-medium text-gray-700">{fallbackColors.length}</span>
+                                <span className="text-xs text-gray-400 truncate max-w-[120px]" title={fallbackColors.join(', ')}>
+                                  ({fallbackColors.slice(0, 3).join(', ')}{fallbackColors.length > 3 ? '...' : ''})
                                 </span>
                               </div>
                             )}
-                            {product.available_sizes && product.available_sizes.length > 0 && (
+                            {fallbackSizes.length > 0 && (
                               <div className="flex items-center gap-1 flex-wrap">
                                 <span className="text-xs text-gray-500">Sizes:</span>
-                                <span className="text-xs font-medium text-gray-700">{product.available_sizes.length}</span>
-                                <span className="text-xs text-gray-400 truncate max-w-[120px]" title={product.available_sizes.join(', ')}>
-                                  ({product.available_sizes.slice(0, 4).join(', ')}{product.available_sizes.length > 4 ? '...' : ''})
+                                <span className="text-xs font-medium text-gray-700">{fallbackSizes.length}</span>
+                                <span className="text-xs text-gray-400 truncate max-w-[120px]" title={fallbackSizes.join(', ')}>
+                                  ({fallbackSizes.slice(0, 4).join(', ')}{fallbackSizes.length > 4 ? '...' : ''})
                                 </span>
                               </div>
                             )}
-                            {(!product.available_colors || product.available_colors.length === 0) && (!product.available_sizes || product.available_sizes.length === 0) && (
+                            {fallbackModels.length > 0 && (
+                              <div className="flex items-center gap-1 flex-wrap">
+                                <span className="text-xs text-gray-500">Models:</span>
+                                <span className="text-xs font-medium text-gray-700">{fallbackModels.length}</span>
+                                <span className="text-xs text-gray-400 truncate max-w-[120px]" title={fallbackModels.join(', ')}>
+                                  ({fallbackModels.slice(0, 3).join(', ')}{fallbackModels.length > 3 ? '...' : ''})
+                                </span>
+                              </div>
+                            )}
+                            {fallbackColors.length === 0 && fallbackSizes.length === 0 && fallbackModels.length === 0 && (
                               <span className="text-xs text-gray-400">{queueVariants.length} variants</span>
                             )}
                           </>

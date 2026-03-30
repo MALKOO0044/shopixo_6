@@ -63,8 +63,44 @@ type DiscoverBatchProgressDebug = {
   shortfallReason: string | null;
 };
 
+type DiscoverCjLeafCategory = {
+  categoryId: string;
+  categoryName: string;
+  normalizedName: string;
+  slug: string;
+  tokens: string[];
+  tokenSet: Set<string>;
+};
+
+type DiscoverCjCategoryMatchType = "exact" | "slug" | "contains" | "token";
+
+type DiscoverCjCategoryMatch = {
+  categoryId: string;
+  categoryName: string;
+  matchType: DiscoverCjCategoryMatchType;
+  score: number;
+};
+
+type DiscoverSupabaseFeatureMapping = {
+  itemId: number;
+  itemName: string;
+  itemSlug: string;
+  cjCategoryId: string | null;
+  cjCategoryName: string | null;
+  matchType: DiscoverCjCategoryMatchType | "unmapped";
+  score: number;
+};
+
+type DiscoverMappedSupabaseFeatureGroup = {
+  groupId: number;
+  groupName: string;
+  items: DiscoverSupabaseFeatureMapping[];
+};
+
 const DISCOVER_NON_PRODUCT_IMAGE_RE = /(sprite|icon|favicon|logo|placeholder|blank|loading|badge|flag|promo|banner|sale|discount|qr|sizechart|size\s*chart|chart|table|guide|thumb|thumbnail|small|tiny|mini)/i;
 const DISCOVER_IMAGE_KEY_SIZE_TOKEN_RE = /[_-](\d{2,4})x(\d{2,4})(?=\.)/gi;
+const DISCOVER_CATEGORY_TEXT_CLEAN_RE = /[^a-z0-9]+/g;
+const DISCOVER_CATEGORY_STOP_WORDS = new Set(["and", "for", "the", "with", "to", "of"]);
 
 function normalizeDiscoverGalleryImageKey(url: string): string {
   const normalizedUrl = String(url || '').trim().toLowerCase();
@@ -187,6 +223,142 @@ function normalizeDiscoverCategoryIds(rawCategoryIds: string[]): string[] {
 
 function normalizeDiscoverPid(value: unknown): string {
   return String(value || '').trim();
+}
+
+function normalizeDiscoverCategoryName(value: unknown): string {
+  return String(value || "")
+    .toLowerCase()
+    .normalize("NFKD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/&/g, " and ")
+    .replace(DISCOVER_CATEGORY_TEXT_CLEAN_RE, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function singularizeDiscoverCategoryToken(token: string): string {
+  if (token.endsWith("ies") && token.length > 4) {
+    return `${token.slice(0, -3)}y`;
+  }
+  if (token.endsWith("s") && token.length > 3) {
+    return token.slice(0, -1);
+  }
+  return token;
+}
+
+function buildDiscoverCategoryTokens(value: unknown): string[] {
+  const normalized = normalizeDiscoverCategoryName(value);
+  if (!normalized) return [];
+
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const rawToken of normalized.split(" ")) {
+    if (!rawToken) continue;
+    const token = singularizeDiscoverCategoryToken(rawToken);
+    if (token.length < 2) continue;
+    if (DISCOVER_CATEGORY_STOP_WORDS.has(token)) continue;
+    if (seen.has(token)) continue;
+    seen.add(token);
+    out.push(token);
+  }
+  return out;
+}
+
+function toDiscoverCategorySlug(value: unknown): string {
+  return normalizeDiscoverCategoryName(value).replace(/\s+/g, "-");
+}
+
+function collectDiscoverLeafCategories(root: Category | null | undefined): DiscoverCjLeafCategory[] {
+  if (!root?.children) return [];
+
+  const out: DiscoverCjLeafCategory[] = [];
+  const seenIds = new Set<string>();
+
+  for (const secondLevel of root.children) {
+    for (const leaf of secondLevel.children || []) {
+      const categoryId = String(leaf?.categoryId || "").trim();
+      const categoryName = String(leaf?.categoryName || "").trim();
+      if (!isValidDiscoverCjCategoryId(categoryId)) continue;
+      if (!categoryName) continue;
+      if (seenIds.has(categoryId)) continue;
+
+      seenIds.add(categoryId);
+      const normalizedName = normalizeDiscoverCategoryName(categoryName);
+      const slug = toDiscoverCategorySlug(categoryName);
+      const tokens = buildDiscoverCategoryTokens(categoryName);
+
+      out.push({
+        categoryId,
+        categoryName,
+        normalizedName,
+        slug,
+        tokens,
+        tokenSet: new Set(tokens),
+      });
+    }
+  }
+
+  return out;
+}
+
+function findBestDiscoverCjCategoryMatch(
+  targetName: string,
+  candidates: DiscoverCjLeafCategory[]
+): DiscoverCjCategoryMatch | null {
+  if (!targetName || candidates.length === 0) return null;
+
+  const targetNormalized = normalizeDiscoverCategoryName(targetName);
+  const targetSlug = toDiscoverCategorySlug(targetName);
+  const targetTokens = buildDiscoverCategoryTokens(targetName);
+
+  let best: DiscoverCjCategoryMatch | null = null;
+
+  for (const candidate of candidates) {
+    let matchType: DiscoverCjCategoryMatchType | null = null;
+    let score = 0;
+
+    if (targetNormalized && candidate.normalizedName === targetNormalized) {
+      matchType = "exact";
+      score = 1;
+    } else if (targetSlug && candidate.slug === targetSlug) {
+      matchType = "slug";
+      score = 0.98;
+    } else if (
+      targetNormalized &&
+      candidate.normalizedName &&
+      (candidate.normalizedName.includes(targetNormalized) || targetNormalized.includes(candidate.normalizedName))
+    ) {
+      matchType = "contains";
+      score = 0.82;
+    } else if (targetTokens.length > 0 && candidate.tokens.length > 0) {
+      let overlap = 0;
+      for (const token of targetTokens) {
+        if (candidate.tokenSet.has(token)) {
+          overlap++;
+        }
+      }
+
+      const overlapRatio = overlap / Math.max(targetTokens.length, candidate.tokens.length);
+      const targetCoverage = overlap / targetTokens.length;
+      const tokenScore = overlapRatio * 0.65 + targetCoverage * 0.35;
+      if (tokenScore >= 0.56) {
+        matchType = "token";
+        score = tokenScore;
+      }
+    }
+
+    if (!matchType) continue;
+    if (!best || score > best.score) {
+      best = {
+        categoryId: candidate.categoryId,
+        categoryName: candidate.categoryName,
+        matchType,
+        score,
+      };
+    }
+  }
+
+  return best;
 }
 
 export default function ProductDiscoveryPage() {
@@ -327,6 +499,15 @@ export default function ProductDiscoveryPage() {
       console.error("Failed to load features:", e);
     }
   };
+
+  const selectedCategory = useMemo(
+    () => categories.find((c: Category) => c.categoryId === category) || null,
+    [categories, category]
+  );
+  const selectedCategoryLeafCategories = useMemo(
+    () => collectDiscoverLeafCategories(selectedCategory),
+    [selectedCategory]
+  );
 
   const searchProducts = async () => {
     if (category === "all" && selectedFeatures.length === 0) {
@@ -911,7 +1092,17 @@ export default function ProductDiscoveryPage() {
     return null;
   };
 
-  const toggleFeature = (featureId: string) => {
+  const toggleFeature = (
+    featureId: string,
+    meta?: {
+      cjCategoryName?: string;
+      supabaseCategoryId?: number;
+      supabaseCategorySlug?: string;
+    }
+  ) => {
+    if (!isValidDiscoverCjCategoryId(featureId)) return;
+    setError(null);
+
     const isRemoving = selectedFeatures.includes(featureId);
     
     setSelectedFeatures((prev: string[]) => {
@@ -928,26 +1119,42 @@ export default function ProductDiscoveryPage() {
       return; // Exit early on removal
     }
     
-    // Adding new feature - try to find matching Supabase category
+    // Adding new feature - keep Supabase mapping in sync without duplicates
     const feature = features.find((f: FeatureOption) => f.id === featureId);
-    if (feature) {
-      const matchingSupabase = findMatchingSupabaseCategory(feature.name);
-      const newFeature: SelectedFeature = {
-        cjCategoryId: featureId,
-        cjCategoryName: feature.name,
-        supabaseCategoryId: matchingSupabase?.id || 0,
-        supabaseCategorySlug: matchingSupabase?.slug || '',
-      };
-      setSelectedFeaturesWithIds((prev: SelectedFeature[]) => [...prev, newFeature]);
-      if (matchingSupabase) {
-        console.log(`[Discovery] Matched CJ "${feature.name}" to Supabase category ${matchingSupabase.id} (${matchingSupabase.slug})`);
-      } else {
-        console.warn(`[Discovery] No Supabase match found for CJ category "${feature.name}"`);
-      }
+    const cjCategoryName = String(meta?.cjCategoryName || feature?.name || featureId).trim() || featureId;
+    let resolvedSupabaseCategoryId = Number(meta?.supabaseCategoryId);
+    let resolvedSupabaseCategorySlug =
+      typeof meta?.supabaseCategorySlug === "string" ? meta.supabaseCategorySlug.trim() : "";
+
+    if (!(Number.isFinite(resolvedSupabaseCategoryId) && resolvedSupabaseCategoryId > 0)) {
+      const matchingSupabase = findMatchingSupabaseCategory(cjCategoryName);
+      resolvedSupabaseCategoryId = matchingSupabase?.id || 0;
+      resolvedSupabaseCategorySlug = matchingSupabase?.slug || "";
     }
+
+    setSelectedFeaturesWithIds((prev: SelectedFeature[]) => {
+      if (prev.some((sf: SelectedFeature) => sf.cjCategoryId === featureId)) {
+        return prev;
+      }
+      return [
+        ...prev,
+        {
+          cjCategoryId: featureId,
+          cjCategoryName,
+          supabaseCategoryId: Number.isFinite(resolvedSupabaseCategoryId) && resolvedSupabaseCategoryId > 0
+            ? resolvedSupabaseCategoryId
+            : 0,
+          supabaseCategorySlug: resolvedSupabaseCategorySlug,
+        },
+      ];
+    });
   };
 
   const getFeatureName = (id: string) => {
+    const trackedFeature = selectedFeaturesWithIds.find((sf: SelectedFeature) => sf.cjCategoryId === id);
+    if (trackedFeature?.cjCategoryName) {
+      return trackedFeature.cjCategoryName;
+    }
     const feature = features.find((f: FeatureOption) => f.id === id);
     return feature?.name || id;
   };
@@ -955,8 +1162,6 @@ export default function ProductDiscoveryPage() {
   const getCategoryChildren = (parentId: string) => {
     return features.filter((f: FeatureOption) => f.parentId === parentId);
   };
-
-  const selectedCategory = categories.find((c: Category) => c.categoryId === category);
 
   // Backend search-and-price route is authoritative for media filtering.
   // Keep rendering aligned with backend results to avoid client/backend divergence.
@@ -978,6 +1183,49 @@ export default function ProductDiscoveryPage() {
   };
   
   const matchingSupabaseCategory = getMatchingSupabaseMainCategory();
+  const mappedSupabaseFeatureGroups = useMemo<DiscoverMappedSupabaseFeatureGroup[]>(() => {
+    if (!matchingSupabaseCategory?.children || selectedCategoryLeafCategories.length === 0) {
+      return [];
+    }
+
+    return matchingSupabaseCategory.children.map((group: SupabaseCategory): DiscoverMappedSupabaseFeatureGroup => {
+      const items: DiscoverSupabaseFeatureMapping[] = (group.children || []).map((item: SupabaseCategory) => {
+        const match = findBestDiscoverCjCategoryMatch(item.name, selectedCategoryLeafCategories);
+        return {
+          itemId: item.id,
+          itemName: item.name,
+          itemSlug: item.slug,
+          cjCategoryId: match?.categoryId || null,
+          cjCategoryName: match?.categoryName || null,
+          matchType: match?.matchType || "unmapped",
+          score: match?.score || 0,
+        };
+      });
+
+      return {
+        groupId: group.id,
+        groupName: group.name,
+        items,
+      };
+    });
+  }, [matchingSupabaseCategory, selectedCategoryLeafCategories]);
+  const supabaseFeatureMappingById = useMemo(() => {
+    const lookup = new Map<number, DiscoverSupabaseFeatureMapping>();
+    for (const group of mappedSupabaseFeatureGroups) {
+      for (const item of group.items) {
+        lookup.set(item.itemId, item);
+      }
+    }
+    return lookup;
+  }, [mappedSupabaseFeatureGroups]);
+  const hasUnmappedSupabaseFeatures = useMemo(
+    () => mappedSupabaseFeatureGroups.some((group: DiscoverMappedSupabaseFeatureGroup) => group.items.some((item: DiscoverSupabaseFeatureMapping) => !item.cjCategoryId)),
+    [mappedSupabaseFeatureGroups]
+  );
+  const hasMappedSupabaseFeatures = useMemo(
+    () => mappedSupabaseFeatureGroups.some((group: DiscoverMappedSupabaseFeatureGroup) => group.items.some((item: DiscoverSupabaseFeatureMapping) => Boolean(item.cjCategoryId))),
+    [mappedSupabaseFeatureGroups]
+  );
   const latestBatchProgressDebug =
     batchProgressDebugLog.length > 0 ? batchProgressDebugLog[batchProgressDebugLog.length - 1] : null;
 
@@ -1014,6 +1262,7 @@ export default function ProductDiscoveryPage() {
               value={category}
               onChange={(e) => {
                 setCategory(e.target.value);
+                setError(null);
                 setSelectedFeatures([]);
                 setSelectedFeaturesWithIds([]); // Clear Supabase category tracking when category changes
                 loadFeatures(e.target.value);
@@ -1034,31 +1283,25 @@ export default function ProductDiscoveryPage() {
             <div className="relative">
               <select
                 onChange={(e) => {
-                  if (e.target.value) {
-                    // Parse the value: "cjId:supabaseId:name"
-                    const [cjId, supabaseId, ...nameParts] = e.target.value.split(':');
-                    const name = nameParts.join(':');
-
-                    if (!isValidDiscoverCjCategoryId(cjId)) {
-                      setError(`Selected feature "${name}" does not map to a valid CJ category ID.`);
-                      e.target.value = "";
-                      return;
-                    }
-                    
-                    // Toggle the CJ feature ID
-                    toggleFeature(cjId);
-                    
-                    // Track the Supabase category ID if available
-                    if (supabaseId && parseInt(supabaseId) > 0) {
-                      const existing = selectedFeaturesWithIds.find((sf: SelectedFeature) => sf.cjCategoryId === cjId);
-                      if (!existing) {
-                        setSelectedFeaturesWithIds((prev: SelectedFeature[]) => [...prev, {
-                          cjCategoryId: cjId,
-                          cjCategoryName: name,
-                          supabaseCategoryId: parseInt(supabaseId),
-                          supabaseCategorySlug: '',
-                        }]);
-                        console.log(`[Discovery] Selected Feature: ${name} (CJ: ${cjId}, Supabase: ${supabaseId})`);
+                  const selectedValue = e.target.value;
+                  if (selectedValue) {
+                    if (selectedValue.startsWith("mapped:")) {
+                      const supabaseId = Number(selectedValue.slice("mapped:".length));
+                      const mapping = supabaseFeatureMappingById.get(supabaseId);
+                      if (mapping?.cjCategoryId && isValidDiscoverCjCategoryId(mapping.cjCategoryId)) {
+                        setError(null);
+                        toggleFeature(mapping.cjCategoryId, {
+                          cjCategoryName: mapping.cjCategoryName || mapping.itemName,
+                          supabaseCategoryId: mapping.itemId,
+                          supabaseCategorySlug: mapping.itemSlug,
+                        });
+                      }
+                    } else if (selectedValue.startsWith("cj:")) {
+                      const [_, cjId, ...encodedNameParts] = selectedValue.split(":");
+                      const decodedName = decodeURIComponent(encodedNameParts.join(":") || "");
+                      if (isValidDiscoverCjCategoryId(cjId)) {
+                        setError(null);
+                        toggleFeature(cjId, { cjCategoryName: decodedName || cjId });
                       }
                     }
                   }
@@ -1068,34 +1311,39 @@ export default function ProductDiscoveryPage() {
               >
                 <option value="">Select features...</option>
                 {/* Use Supabase categories if available for better organization */}
-                {matchingSupabaseCategory?.children?.map(group => (
-                  <optgroup key={group.id} label={group.name}>
-                    {group.children?.map(item => {
-                      // Find matching CJ category by name for the CJ search
-                      const matchingCjCat = selectedCategory?.children
-                        ?.flatMap(c => c.children || [])
-                        ?.find(cj => cj?.categoryName?.toLowerCase() === item.name.toLowerCase());
-                      const cjId = matchingCjCat?.categoryId || `supabase-${item.id}`;
-                      
+                {mappedSupabaseFeatureGroups.map((group: DiscoverMappedSupabaseFeatureGroup) => (
+                  <optgroup key={group.groupId} label={group.groupName}>
+                    {group.items.map((mappedItem: DiscoverSupabaseFeatureMapping) => {
+                      const isMapped = Boolean(mappedItem.cjCategoryId);
+                      const isAlreadySelected = mappedItem.cjCategoryId
+                        ? selectedFeatures.includes(mappedItem.cjCategoryId)
+                        : false;
+                      const matchHint =
+                        mappedItem.matchType === "token" || mappedItem.matchType === "contains"
+                          ? " (mapped by name)"
+                          : mappedItem.matchType === "unmapped"
+                            ? " (unmapped)"
+                            : "";
+
                       return (
-                        <option 
-                          key={item.id} 
-                          value={`${cjId}:${item.id}:${item.name}`}
-                          disabled={selectedFeatures.includes(cjId)}
+                        <option
+                          key={mappedItem.itemId}
+                          value={isMapped ? `mapped:${mappedItem.itemId}` : `unmapped:${mappedItem.itemId}`}
+                          disabled={!isMapped || isAlreadySelected}
                         >
-                          {item.name}
+                          {mappedItem.itemName}{matchHint}
                         </option>
                       );
                     })}
                   </optgroup>
                 ))}
                 {/* Fallback to CJ categories if no Supabase match */}
-                {!matchingSupabaseCategory && selectedCategory?.children?.map(child => (
+                {(!matchingSupabaseCategory || !hasMappedSupabaseFeatures) && selectedCategory?.children?.map(child => (
                   <optgroup key={child.categoryId} label={child.categoryName}>
                     {child.children?.map(subChild => (
                       <option 
                         key={subChild.categoryId} 
-                        value={`${subChild.categoryId}:0:${subChild.categoryName}`}
+                        value={`cj:${subChild.categoryId}:${encodeURIComponent(subChild.categoryName)}`}
                         disabled={selectedFeatures.includes(subChild.categoryId)}
                       >
                         {subChild.categoryName}
@@ -1105,6 +1353,11 @@ export default function ProductDiscoveryPage() {
                 ))}
               </select>
             </div>
+            {matchingSupabaseCategory && hasUnmappedSupabaseFeatures && (
+              <p className="mt-1 text-xs text-amber-600">
+                Some feature rows are visible for review but currently unmapped to a CJ category and are disabled.
+              </p>
+            )}
             <div className="flex flex-wrap gap-1 mt-2">
               {selectedFeatures.map(featureId => (
                 <span
