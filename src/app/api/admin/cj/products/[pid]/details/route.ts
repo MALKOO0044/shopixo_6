@@ -381,6 +381,9 @@ export async function GET(
             variantStockMap.set(key, stockData);
           }
         }
+      } else if (!inventoryErrorMessage) {
+        inventoryStatus = inventoryStatus === 'ok' ? 'partial' : inventoryStatus;
+        inventoryErrorMessage = 'Per-variant inventory unavailable; using product-level totals only.';
       }
     } catch (e: any) {
       console.log(`[ProductDetails] Error fetching inventory: ${e?.message}`);

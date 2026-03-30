@@ -73,16 +73,15 @@ export default function PreviewPageFour({ product }: PreviewPageFourProps) {
   const inventoryVariantsCount = inventoryVariants.length;
   
   // Count variants with ACTUAL stock (> 0) - only these should be counted as "in stock"
-  // Variants with cjStock or factoryStock = -1 have unknown per-variant stock
-  // Variants with cjStock and factoryStock = 0 are known to be out of stock
   const variantsWithActualStock = inventoryVariants.filter(v => (v.cjStock > 0 || v.factoryStock > 0));
   const inStockCount = variantsWithActualStock.length;
   
-  // Check if any variant has unknown stock (-1)
-  const hasUnknownVariantStock = inventoryVariants.some(v => v.cjStock < 0 || v.factoryStock < 0);
-  
   // Check for inventory fetch errors
   const inventoryHasError = product.inventoryStatus === 'error' || product.inventoryStatus === 'partial';
+  const hasLegacyUnknownVariantStock = inventoryVariants.some(v => v.cjStock < 0 || v.factoryStock < 0);
+  const hasUnknownVariantStock =
+    hasLegacyUnknownVariantStock ||
+    (inventoryVariantsCount === 0 && inventoryHasError && (totalStock > 0 || cjStock > 0 || factoryStock > 0));
 
   return (
     <div className="space-y-6">
@@ -152,7 +151,7 @@ export default function PreviewPageFour({ product }: PreviewPageFourProps) {
                 {hasUnknownVariantStock ? 'Listed Variants:' : 'Available Variants:'}
               </span>
               <span className={`font-semibold ${hasUnknownVariantStock ? 'text-gray-600' : 'text-green-600'}`}>
-                {hasUnknownVariantStock ? inventoryVariantsCount : inStockCount}
+                {hasUnknownVariantStock ? Math.max(inventoryVariantsCount, product.totalVariants) : inStockCount}
               </span>
             </div>
 
@@ -164,7 +163,7 @@ export default function PreviewPageFour({ product }: PreviewPageFourProps) {
             
             {hasUnknownVariantStock && (
               <div className="text-sm text-amber-600 bg-amber-50 rounded-lg p-2">
-                Per-variant stock data not available from CJ. Product has {totalStock.toLocaleString()} total units.
+                Per-variant stock data is unavailable from CJ. Product has {totalStock.toLocaleString()} total units.
               </div>
             )}
           </div>
@@ -297,9 +296,9 @@ export default function PreviewPageFour({ product }: PreviewPageFourProps) {
           <div className="bg-blue-50 border-t border-blue-200 px-4 py-3 text-xs text-blue-700">
             <p><strong>CJ:</strong> Stock in CJ warehouse, ready for immediate shipping.</p>
             <p><strong>Factory:</strong> Stock at supplier. May require 1-3 days processing before shipping.</p>
-            {inventoryVariants.some(v => v.cjStock < 0) && (
+            {hasUnknownVariantStock && (
               <p className="mt-2 text-amber-600">
-                <strong>Note:</strong> "-" indicates per-variant stock not available from CJ. See total stock in "Stock Status" above.
+                <strong>Note:</strong> Per-variant stock may be unavailable from CJ for this product. See total stock in "Stock Status" above.
               </p>
             )}
           </div>

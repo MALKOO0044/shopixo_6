@@ -1422,59 +1422,64 @@ async function handleSearch(req: Request, isPost: boolean) {
         console.log(`[Search&Price] Product ${pid} - Built ${inventoryVariants.length} inventoryVariants for display`);
       }
       
-      // Fallback: if no inventoryVariants but we have product-level stock,
-      // try to build from product's variant list (from fullDetails or item)
-      // IMPORTANT: We show real variant names/prices but mark stock as -1 (unknown)
-      // to maintain 100% accuracy - we never fabricate per-variant stock counts
+      // Fallback: if no per-variant inventory but product-level stock exists,
+      // only synthesize a single-row inventory view for true single-variant products.
+      // For configurable products, we keep inventoryVariants empty and mark partial status.
       if (inventoryVariants.length === 0 && (realInventory?.totalAvailable || 0) > 0) {
         const productSource = fullDetails || item;
         const productVariantList = productSource?.variantList || productSource?.skuList || productSource?.variants || [];
-        
-        if (Array.isArray(productVariantList) && productVariantList.length > 0) {
-          // Build inventoryVariants from product's variant list
-          // Show real names and prices, but use -1 for stock (indicates "per-variant unknown")
-          // The UI can display total stock from product-level data separately
-          for (const pv of productVariantList) {
-            const sku = pv.variantSku || pv.sku || pv.vid || '';
-            // IMPORTANT: variantKey is the SHORT name like "Black And Silver-2XL"
-            // variantNameEn is the LONG descriptive name - use as fallback
-            const variantKeyShort = pv.variantKey || '';
-            const variantNameLong = pv.variantNameEn || pv.variantName || pv.skuName || '';
-            const price = Number(pv.variantSellPrice || pv.sellPrice || pv.variantPrice || pv.price || 0);
-            const vid = pv.vid || '';
-            
-            // Parse a clean short name - prioritize variantKey (short) over variantNameEn (long)
-            let shortName = variantKeyShort || variantNameLong;
-            shortName = shortName.replace(/[\u4e00-\u9fff]/g, '').trim();
-            if (!shortName) {
-              shortName = sku || `Variant-${vid || '?'}`;
-            }
-            
-            // Use -1 to indicate "per-variant stock unknown" 
-            // This maintains accuracy - we don't fabricate numbers
-            inventoryVariants.push({
-              variantId: vid || sku,
-              sku,
-              shortName,
-              priceUSD: price,
-              cjStock: -1,      // Unknown per-variant
-              factoryStock: -1, // Unknown per-variant
-              totalStock: -1,   // Unknown per-variant
-            });
-          }
-          console.log(`[Search&Price] Product ${pid} - Built ${inventoryVariants.length} inventoryVariants from product variant list (stock marked unknown)`);
-        } else {
-          // True single-variant product - show actual totals
+        const variantCountRaw = Number(
+          productSource?.variantNum ??
+          productSource?.variantCount ??
+          productSource?.variantTotal ??
+          0
+        );
+        const variantCountHint = Array.isArray(productVariantList) && productVariantList.length > 0
+          ? productVariantList.length
+          : (Number.isFinite(variantCountRaw) && variantCountRaw > 0 ? variantCountRaw : 0);
+
+        if (variantCountHint === 1) {
+          const fallbackVariant = Array.isArray(productVariantList) && productVariantList.length === 1
+            ? productVariantList[0]
+            : null;
+
+          const fallbackSku = String(fallbackVariant?.variantSku || fallbackVariant?.sku || cjSku || '').trim();
+          const fallbackVariantId = String(fallbackVariant?.vid || fallbackVariant?.variantId || fallbackSku || cjSku || '').trim();
+          const fallbackPrice = Number(
+            fallbackVariant?.variantSellPrice ||
+            fallbackVariant?.sellPrice ||
+            fallbackVariant?.variantPrice ||
+            fallbackVariant?.price ||
+            0
+          );
+          const fallbackShortNameRaw = String(
+            fallbackVariant?.variantKey ||
+            fallbackVariant?.variantNameEn ||
+            fallbackVariant?.variantName ||
+            fallbackSku ||
+            'Default'
+          );
+          const fallbackShortName = fallbackShortNameRaw.replace(/[\u4e00-\u9fff]/g, '').trim() || 'Default';
+
           inventoryVariants.push({
-            variantId: cjSku,
-            sku: cjSku,
-            shortName: 'Default',
-            priceUSD: 0,
+            variantId: fallbackVariantId || cjSku,
+            sku: fallbackSku || cjSku,
+            shortName: fallbackShortName,
+            priceUSD: Number.isFinite(fallbackPrice) && fallbackPrice > 0 ? fallbackPrice : 0,
             cjStock: realInventory?.totalCJ ?? 0,
             factoryStock: realInventory?.totalFactory ?? 0,
             totalStock: realInventory?.totalAvailable ?? 0,
           });
-          console.log(`[Search&Price] Product ${pid} - Used product-level inventory as single inventoryVariant`);
+          console.log(`[Search&Price] Product ${pid} - Used product-level inventory fallback for single-variant view`);
+        } else {
+          inventoryStatus = inventoryStatus === 'ok' ? 'partial' : inventoryStatus;
+          const perVariantUnknownReason = 'Per-variant inventory unavailable; using product-level totals only.';
+          inventoryErrorMessage = inventoryErrorMessage
+            ? `${inventoryErrorMessage}; ${perVariantUnknownReason}`
+            : perVariantUnknownReason;
+          console.log(
+            `[Search&Price] Product ${pid} - Skipping synthetic inventoryVariants for configurable product (${variantCountHint} variants) due to missing per-variant stock`
+          );
         }
       }
       

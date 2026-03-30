@@ -129,7 +129,7 @@ export async function handleStripeWebhook(req: Request): Promise<Response> {
 
           // 3) Decrement stock (best-effort)
           await Promise.all(
-            parsedCart.map((item) => {
+            parsedCart.map(async (item) => {
               const pid = typeof item.productId === 'string' ? Number(item.productId) : item.productId;
               const vid = item.variantId ? (typeof item.variantId === 'string' ? Number(item.variantId) : item.variantId) : null;
               if (vid) {
@@ -139,7 +139,39 @@ export async function handleStripeWebhook(req: Request): Promise<Response> {
                   quantity_in: item.quantity,
                 });
               }
-              // Fallback to product-level stock decrement
+
+              // Strict fallback policy: only allow product-level decrement for true single-variant products.
+              const { count: variantRowsCount } = await supabaseAdmin
+                .from("product_variants")
+                .select("id", { count: "exact", head: true })
+                .eq("product_id", pid);
+
+              const hasConfigurableVariants = Number(variantRowsCount || 0) > 1;
+              if (hasConfigurableVariants) {
+                log.warn("stripe_variant_id_missing_for_configurable", {
+                  orderId: order.id,
+                  productId: pid,
+                  quantity: item.quantity,
+                  variantRowsCount,
+                });
+                return null;
+              }
+
+              if (Number(variantRowsCount || 0) === 1) {
+                const { data: singleVariant } = await supabaseAdmin
+                  .from("product_variants")
+                  .select("id")
+                  .eq("product_id", pid)
+                  .maybeSingle();
+
+                if (singleVariant?.id) {
+                  return supabaseAdmin.rpc("decrement_variant_stock", {
+                    variant_id_in: singleVariant.id,
+                    quantity_in: item.quantity,
+                  });
+                }
+              }
+
               return supabaseAdmin.rpc("decrement_stock", {
                 product_id_in: pid,
                 quantity_in: item.quantity,

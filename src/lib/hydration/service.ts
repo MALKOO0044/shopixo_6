@@ -163,6 +163,9 @@ export async function ensureHydrated(pid: string, opts: HydrateOptions = {}): Pr
         ].filter(k => k && k.length > 0);
         for (const key of keysToStore) variantStockMap.set(key, stockData);
       }
+    } else if (!inventoryErrorMessage) {
+      inventoryStatus = inventoryStatus === 'ok' ? 'partial' : inventoryStatus;
+      inventoryErrorMessage = 'Per-variant inventory unavailable; using product-level totals only.';
     }
   } catch (e: any) {
     inventoryStatus = 'error';

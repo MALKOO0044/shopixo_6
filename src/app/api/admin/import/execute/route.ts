@@ -1249,6 +1249,9 @@ export async function POST(req: NextRequest) {
         }
 
         if (hasVariantsTable && variants.length > 0) {
+          const hasVariantCjStockColumn = await hasColumn('product_variants', 'cj_stock').catch(() => false);
+          const hasVariantFactoryStockColumn = await hasColumn('product_variants', 'factory_stock').catch(() => false);
+
           // Create proper variant rows with dynamic options and legacy compatibility values.
           const variantRows = variants.map((v: any) => {
             const parsedVariantOptions = parseDynamicVariantOptions(v.variant_options);
@@ -1275,6 +1278,8 @@ export async function POST(req: NextRequest) {
               price: v.price_store ?? v.price_sar,
               cost_price: v.cost_usd || null,
               stock: v.stock,
+              ...(hasVariantCjStockColumn ? { cj_stock: v.cj_stock ?? null } : {}),
+              ...(hasVariantFactoryStockColumn ? { factory_stock: v.factory_stock ?? null } : {}),
               image_url:
                 typeof v.image_url === 'string' && v.image_url.trim()
                   ? enhanceProductImageUrl(v.image_url.trim(), 'gallery')
